@@ -1,0 +1,26 @@
+# Cấu hình dự án CD-FSS DINOv2 + TTA
+
+dataset:
+  img_size: 392
+  num_workers: 4
+
+model:
+  backbone_name: "dinov2_vits14"  # Hoặc dinov2_vitb14
+  patch_size: 14
+  intermediate_layers: [2, 5, 8, 11]  # Lấy feature từ 4 block (0-indexed)
+  adapter_channels: 64
+
+tta:
+  epochs: 25
+  lr: 0.01
+  momentum: 0.9
+  weight_decay: 0.0005
+  loss_weights:
+    w_nce_q: 1.0
+    w_nce_s: 1.0
+    w_stat: 0.5
+    w_p: 1.0
+    w_self_attn: 2.0
+
+evaluation:
+  metrics: ["mIoU", "FB-IoU"]

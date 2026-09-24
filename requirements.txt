@@ -1,0 +1,9 @@
+torch>=2.0.0
+torchvision>=0.15.0
+pydensecrf
+opencv-python
+scikit-learn
+scikit-image
+numpy
+pyyaml
+tqdm

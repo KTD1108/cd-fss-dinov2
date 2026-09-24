@@ -1,0 +1,16 @@
+# Dataset and models
+datasets/
+models/weights/
+*.pth
+*.pt
+
+# Python and IDE
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.vscode/
+.idea/
+
+# Experiments
+experiments/*.png
+experiments/*.jpg

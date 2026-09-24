@@ -24,8 +24,21 @@ Tested on the full **1000 episodes** of the FSS-1000 dataset:
 pip install -r requirements.txt
 ```
 
+## Dataset Preparation
+To run the benchmark, you need the FSS-1000 dataset.
+1. Download the dataset from the official repository: [HKUST-VG/FSS-1000](https://github.com/HKUST-VG/FSS-1000).
+2. Extract the dataset and place it in the `datasets/` folder so the structure looks like this:
+   ```text
+   cd-fss-dinov2/
+   ├── datasets/
+   │   └── FSS-1000/
+   │       ├── class_name_1/
+   │       ├── class_name_2/
+   │       └── ...
+   ```
+
 ## Running the Benchmark
-Ensure your dataset is placed at `datasets/FSS-1000`. You can run the benchmark locally or on Google Colab:
+Once the dataset is ready at `datasets/FSS-1000`, you can run the benchmark locally or on Google Colab:
 ```bash
 python experiments/run_benchmark.py --dataset_root "datasets/FSS-1000" --episodes 1000
 ```

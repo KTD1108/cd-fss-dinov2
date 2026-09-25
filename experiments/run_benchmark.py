@@ -14,16 +14,17 @@ from models.dinov2_backbone import DINOv2Backbone
 from models.adapter import MultiLevelAdapters
 from models.crf_refinement import DenseCRFRefinement
 from core.losses import DenseContrastiveLoss, FeatureStatLoss, PrototypeAlignmentLoss
-from core.attention import MetaDecoder
+from core.attention import MetaDecoder, MultiLayerFusion
 from core.thresholding import otsu_thresholding
 from core.evaluator import Evaluator
 from data.transforms import RandomShearAugmentation
 from data.dataset import FSS1000Dataset, DeepGlobeDataset, ISICDataset, SUIMDataset, LungDataset
 from core.visualizer import save_prediction_visualization
 
-def run_benchmark(num_episodes: int = 10, dataset_root: str = None, dataset_name: str = "fss", config_path: str = "config/default_config.yaml"):
+def run_benchmark(num_episodes: int = 10, dataset_root: str = None, dataset_name: str = "fss", config_path: str = "config/default_config.yaml", use_meta_decoder: bool = False):
     print("=" * 65)
-    print(f"BẮT ĐẦU CHẠY BENCHMARK DINOv2 + TTA CHO {num_episodes} EPISODES")
+    mode_name = "META-TRAINED DECODER" if use_meta_decoder else "ZERO-SHOT (TRAINING-FREE)"
+    print(f"BẮT ĐẦU CHẠY BENCHMARK DINOv2 ({mode_name}) CHO {num_episodes} EPISODES")
     if dataset_root and os.path.exists(dataset_root):
         print(f"Nguồn dữ liệu: {dataset_root} (Loại: {dataset_name})")
     else:
@@ -69,16 +70,21 @@ def run_benchmark(num_episodes: int = 10, dataset_root: str = None, dataset_name
     l_p = PrototypeAlignmentLoss().to(device)
     augmentation = RandomShearAugmentation()
     
-    # 🌟 Sử dụng MetaDecoder (có trọng số) thay vì MultiLayerFusion
-    fusion_module = MetaDecoder(in_channels=384, num_layers=4).to(device)
-    weight_path = "models/weights/meta_decoder_best.pth"
-    if os.path.exists(weight_path):
-        fusion_module.load_state_dict(torch.load(weight_path, map_location=device))
-        print("✅ Đã tải thành công trọng số MetaDecoder từ quá trình Meta-Training!")
+    if use_meta_decoder:
+        # 🌟 Sử dụng MetaDecoder (có trọng số)
+        fusion_module = MetaDecoder(in_channels=384, num_layers=4).to(device)
+        weight_path = "models/weights/meta_decoder_best.pth"
+        if os.path.exists(weight_path):
+            fusion_module.load_state_dict(torch.load(weight_path, map_location=device))
+            print("✅ Đang sử dụng chế độ: META-DECODER (Đã nạp trọng số học thuật)")
+        else:
+            print("⚠️ CẢNH BÁO: Không tìm thấy trọng số MetaDecoder. Đang chạy với trọng số ngẫu nhiên!")
+        fusion_module.eval() # Khóa trọng số trong lúc Test-Time Adaptation
     else:
-        print("⚠️ CẢNH BÁO: Không tìm thấy trọng số MetaDecoder. Đang chạy với trọng số ngẫu nhiên!")
-    fusion_module.eval() # Khóa trọng số trong lúc Test-Time Adaptation
-    
+        # 🛡️ Sử dụng MultiLayerFusion (Không trọng số - Tốt cho Cross-Domain)
+        fusion_module = MultiLayerFusion().to(device)
+        print("✅ Đang sử dụng chế độ: ZERO-SHOT (MultiLayerFusion - Kháng Domain Shift cực tốt)")
+        
     crf_refiner = DenseCRFRefinement()
 
     overall_evaluator = Evaluator()
@@ -206,12 +212,14 @@ if __name__ == "__main__":
     parser.add_argument("--dataset_root", type=str, default=None, help="Đường dẫn root tới dataset")
     parser.add_argument("--dataset_name", type=str, default="fss", choices=["fss", "deepglobe", "isic", "suim", "lung"], help="Tên bộ dữ liệu")
     parser.add_argument("--config", type=str, default="config/default_config.yaml", help="Đường dẫn file config")
+    parser.add_argument("--use_meta_decoder", action="store_true", help="Bật cờ này để dùng MetaDecoder, nếu không sẽ dùng Zero-Shot")
     args = parser.parse_args()
 
     run_benchmark(
         num_episodes=args.episodes, 
         dataset_root=args.dataset_root, 
         dataset_name=args.dataset_name,
-        config_path=args.config
+        config_path=args.config,
+        use_meta_decoder=args.use_meta_decoder
     )
 

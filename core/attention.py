@@ -102,6 +102,66 @@ class MultiLayerFusion(nn.Module):
         fused_pred = (stacked_preds * w).sum(dim=1)
         return fused_pred
 
+class MetaDecoder(nn.Module):
+    """
+    Mạng giải mã có khả năng học (Learnable Decoder) dùng cho Meta-Training.
+    Thay vì chỉ tính trung bình, nó nhận vào Đặc trưng truy vấn (Query Features) 
+    cộng với các bản đồ tương đồng (Correlation Maps) từ nhiều tầng, 
+    sau đó dùng Tích chập (Convolutions) để tinh chỉnh viền vật thể.
+    """
+    def __init__(self, in_channels: int = 384, num_layers: int = 4):
+        super().__init__()
+        self.cross_attn = DenseCrossAttention()
+        
+        # Đầu vào của Decoder: DINOv2 Feature (384) + N Correlation Maps (4) = 388 channels
+        decoder_in_dim = in_channels + num_layers
+        
+        self.decoder = nn.Sequential(
+            nn.Conv2d(decoder_in_dim, 256, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.Dropout2d(0.1),
+            
+            nn.Conv2d(256, 64, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            
+            nn.Conv2d(64, 1, kernel_size=1) # Trả về 1 kênh xác suất duy nhất (Logits)
+        )
+
+    def forward(
+        self,
+        query_feats: List[torch.Tensor],
+        support_feats: List[torch.Tensor],
+        support_mask: torch.Tensor,
+        target_size: tuple = (224, 224)
+    ) -> torch.Tensor:
+        
+        # 1. Tính toán các bản đồ tương đồng từ tất cả các tầng
+        pred_maps = []
+        for q_f, s_f in zip(query_feats, support_feats):
+            pred_l = self.cross_attn(q_f, s_f, support_mask) # [B, 1, H_feat, W_feat]
+            pred_maps.append(pred_l)
+            
+        # [B, 4, H_feat, W_feat]
+        stacked_preds = torch.cat(pred_maps, dim=1) 
+        
+        # 2. Lấy Feature Map của tầng sâu nhất để làm "Ngữ cảnh Không gian" (Spatial Context)
+        deepest_q_feat = query_feats[-1] # [B, 384, H_feat, W_feat]
+        
+        # 3. Nối Feature Map và Correlation Maps lại với nhau
+        decoder_input = torch.cat([deepest_q_feat, stacked_preds], dim=1) # [B, 388, H_feat, W_feat]
+        
+        # 4. Đưa qua Mạng nơ-ron Tích chập (Decoder) để tinh chỉnh
+        # Logits sẽ có giá trị âm/dương (chưa qua sigmoid)
+        refined_logits = self.decoder(decoder_input) # [B, 1, H_feat, W_feat]
+        
+        # 5. Phóng to về kích thước ảnh gốc
+        refined_mask = F.interpolate(refined_logits, size=target_size, mode="bilinear", align_corners=False)
+        
+        # Chuyển logits thành xác suất [0, 1]
+        return torch.sigmoid(refined_mask)
+
 if __name__ == "__main__":
     print("Testing DenseCrossAttention & MultiLayerFusion...")
     q_feats = [torch.randn(1, 384, 16, 16) for _ in range(4)]

@@ -93,9 +93,16 @@ class FSS1000Dataset(Dataset):
         if len(all_classes) == 0:
             raise ValueError(f"Không tìm thấy class folder nào tại: {root_dir}")
 
-        # Phân chia theo split nếu cần (test split: classes 760..1000 hoặc dùng toàn bộ 1000 class cho zero-shot CD-FSS)
-        if split == 'test' and len(all_classes) >= 1000:
-            self.classes = all_classes[760:1000]
+        # Phân chia theo split (FSS-1000 chuẩn: 520 train, 240 val, 240 test)
+        if len(all_classes) >= 1000:
+            if split == 'train':
+                self.classes = all_classes[:520]
+            elif split == 'val':
+                self.classes = all_classes[520:760]
+            elif split == 'test':
+                self.classes = all_classes[760:1000]
+            else:
+                self.classes = all_classes # all
         else:
             self.classes = all_classes
 

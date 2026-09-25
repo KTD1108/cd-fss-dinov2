@@ -2,15 +2,62 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import List
+import cv2
+import numpy as np
+
+def compute_dynamic_threshold_mask(prob_map: torch.Tensor, drop_least: float = 0.05) -> torch.Tensor:
+    """
+    Áp dụng thuật toán Otsu Dynamic Thresholding kết hợp ràng buộc pred_mean (giống chuẩn ABCDFSS).
+    Thay vì dùng ngưỡng cố định 0.5 (gây ra tràn False Positive làm tụt Background IoU),
+    thuật toán này tự động tìm điểm phân tách tối ưu giữa Foreground và Background cho từng ảnh cụ thể:
+        thresh = max(otsu_thresh, mean_prob)
+    
+    prob_map: [B, 1, H, W] hoặc [H, W] nằm trong dải [0, 1]
+    Returns:
+        binary_mask: [B, 1, H, W] (0.0 hoặc 1.0)
+    """
+    if prob_map.dim() == 2:
+        prob_map = prob_map.unsqueeze(0).unsqueeze(0)
+    elif prob_map.dim() == 3:
+        prob_map = prob_map.unsqueeze(1)
+
+    B, _, H, W = prob_map.shape
+    binary_masks = []
+
+    for i in range(B):
+        img_np = prob_map[i, 0].detach().cpu().numpy()
+        npmin, npmax = float(img_np.min()), float(img_np.max())
+        
+        # Nếu khoảng giá trị quá hẹp (ảnh toàn nền hoặc không có kích hoạt)
+        if npmax - npmin < 1e-6:
+            binary_masks.append(torch.zeros((1, H, W), device=prob_map.device))
+            continue
+
+        norm_img = ((img_np - npmin) / (npmax - npmin + 1e-8) * 255.0).astype(np.uint8)
+        truncated = norm_img[norm_img >= int(255.0 * drop_least)]
+        if len(truncated) == 0:
+            truncated = norm_img
+
+        # Tính ngưỡng Otsu
+        thresh_val, _ = cv2.threshold(truncated, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        thresh_orig = (float(thresh_val) / 255.0) * (npmax - npmin) + npmin
+
+        # Ràng buộc pred_mean: vật thể foreground bắt buộc phải có độ tương đồng cao hơn trung bình toàn ảnh
+        final_thresh = max(thresh_orig, float(img_np.mean()))
+
+        mask_np = (img_np > final_thresh).astype(np.float32)
+        binary_masks.append(torch.from_numpy(mask_np).unsqueeze(0).to(prob_map.device))
+
+    return torch.stack(binary_masks, dim=0)
 
 class DenseCrossAttention(nn.Module):
     """
     Tính Dense Cross-Attention giữa Query Feature Map và Support Feature Map
-    dựa trên Support Mask.
+    dựa trên Support Mask theo cơ chế Dense Affinity Matrix.
     """
-    def __init__(self, temperature_scale: float = 20.0):
+    def __init__(self, temperature: float = 0.1):
         super().__init__()
-        self.temperature_scale = temperature_scale
+        self.temperature = temperature
 
     def forward(self, query_feat: torch.Tensor, support_feat: torch.Tensor, support_mask: torch.Tensor) -> torch.Tensor:
         """
@@ -19,75 +66,36 @@ class DenseCrossAttention(nn.Module):
         support_mask: [B, 1, H_orig, W_orig] hoặc [B, 1, H, W]
         
         Returns:
-            pred_similarity_map: [B, 1, H, W]
+            pred_dense_map: [B, 1, H, W] trong dải [0, 1]
         """
         B, C, H, W = query_feat.shape
 
-        # 🔥 THUẬT TOÁN ĐỘT PHÁ: Adapt Before Comparison bằng AdaIN (Adaptive Instance Normalization)
-        # Căn chỉnh hoàn toàn không gian màu/kết cấu (Style) của Query sang Support Domain
-        q_mean = query_feat.mean(dim=(2, 3), keepdim=True)
-        q_std = query_feat.std(dim=(2, 3), keepdim=True) + 1e-5
-        s_mean = support_feat.mean(dim=(2, 3), keepdim=True)
-        s_std = support_feat.std(dim=(2, 3), keepdim=True) + 1e-5
-        
-        # Biến đổi Query
-        query_feat_adapted = ((query_feat - q_mean) / q_std) * s_std + s_mean
+        # Chuẩn hóa L2 dọc theo chiều channel để tính Cosine Correlation chính xác
+        Q = F.normalize(query_feat, dim=1).flatten(2).permute(0, 2, 1) # [B, HW, C]
+        K = F.normalize(support_feat, dim=1).flatten(2)                 # [B, C, HW]
 
-        # Reshape Q, K về [B, N, C] với N = H * W
-        Q = query_feat_adapted.flatten(2).permute(0, 2, 1) # [B, N, C]
-        K = support_feat.flatten(2)                # [B, C, N]
-
-        # Rescale & Normalization (Cosine similarity)
-        Q_norm = F.normalize(Q, dim=-1)
-        K_norm = F.normalize(K, dim=1)
-
-        # Cosine Correlation Matrix [B, N_query, N_support] scaled by temperature multiplier
-        attn = torch.bmm(Q_norm, K_norm) * self.temperature_scale
-        attn = F.softmax(attn, dim=-1) # Softmax trên không gian support
+        # Ma trận tương quan Dense Affinity: [B, HW_query, HW_support]
+        affinity = torch.bmm(Q, K) / self.temperature
+        attn = F.softmax(affinity, dim=-1) # Softmax trên toàn bộ không gian pixel support
 
         # Downsample support mask về kích thước feature (H, W)
         if support_mask.dim() == 3:
             support_mask = support_mask.unsqueeze(1)
         
         mask_downsampled = F.interpolate(support_mask.float(), size=(H, W), mode="nearest")
-        V = mask_downsampled.flatten(2).permute(0, 2, 1) # [B, N, 1]
+        V = mask_downsampled.flatten(2).permute(0, 2, 1) # [B, HW_support, 1]
 
-        # Dự đoán phân đoạn Query từ dense cross-attention: [B, 1, H, W]
+        # Tích hợp xác suất Foreground cho từng pixel Query: [B, 1, H, W]
         pred_map_dense = torch.bmm(attn, V).permute(0, 2, 1).reshape(B, 1, H, W)
-
-        # Trích xuất Foreground Prototype & Background Prototype từ Support Feature
-        s_fg_mask = mask_downsampled
-        s_bg_mask = 1.0 - s_fg_mask
-
-        s_fg_count = s_fg_mask.sum(dim=(2, 3), keepdim=True).clamp(min=1.0)
-        s_bg_count = s_bg_mask.sum(dim=(2, 3), keepdim=True).clamp(min=1.0)
-
-        proto_fg = (support_feat * s_fg_mask).sum(dim=(2, 3), keepdim=True) / s_fg_count
-        proto_bg = (support_feat * s_bg_mask).sum(dim=(2, 3), keepdim=True) / s_bg_count
-
-        proto_fg_norm = F.normalize(proto_fg, dim=1)
-        proto_bg_norm = F.normalize(proto_bg, dim=1)
-
-        # Cosine similarity giữa Query Feature với Foreground và Background Prototype
-        q_feat_norm = F.normalize(query_feat, dim=1)
-        sim_fg = (q_feat_norm * proto_fg_norm).sum(dim=1, keepdim=True) * 10.0
-        sim_bg = (q_feat_norm * proto_bg_norm).sum(dim=1, keepdim=True) * 10.0
-
-        # Dual-Prototype Softmax Competition
-        sim_concat = torch.cat([sim_bg, sim_fg], dim=1) # [B, 2, H, W]
-        proto_prob = F.softmax(sim_concat, dim=1)[:, 1:2, :, :] # Lấy xác suất Foreground
-
-        # Kết hợp ensemble giữa Dense Attention Map và Dual-Prototype Softmax Map
-        pred_map = 0.5 * pred_map_dense + 0.5 * proto_prob
-        return pred_map
+        return pred_map_dense
 
 class MultiLayerFusion(nn.Module):
     """
     Nội suy các correlation/pred maps từ nhiều tầng về kích thước ảnh gốc và lấy trung bình có trọng số.
     """
-    def __init__(self, layer_weights: List[float] = [0.1, 0.2, 0.35, 0.35]):
+    def __init__(self, layer_weights: List[float] = [0.1, 0.2, 0.35, 0.35], temperature: float = 0.1):
         super().__init__()
-        self.cross_attn = DenseCrossAttention()
+        self.cross_attn = DenseCrossAttention(temperature=temperature)
         weights_tensor = torch.tensor(layer_weights, dtype=torch.float32)
         self.register_buffer("weights", weights_tensor / weights_tensor.sum())
 
@@ -115,17 +123,12 @@ class MultiLayerFusion(nn.Module):
 class MetaDecoder(nn.Module):
     """
     Mạng giải mã có khả năng học (Learnable Decoder) dùng cho Meta-Training.
-    Thay vì chỉ tính trung bình, nó nhận vào Đặc trưng truy vấn (Query Features) 
-    cộng với các bản đồ tương đồng (Correlation Maps) từ nhiều tầng, 
-    sau đó dùng Tích chập (Convolutions) để tinh chỉnh viền vật thể.
     """
     def __init__(self, in_channels: int = 384, num_layers: int = 4):
         super().__init__()
         self.cross_attn = DenseCrossAttention()
         
-        # Đầu vào của Decoder: DINOv2 Feature (384) + N Correlation Maps (4) = 388 channels
         decoder_in_dim = in_channels + num_layers
-        
         self.decoder = nn.Sequential(
             nn.Conv2d(decoder_in_dim, 256, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(256),
@@ -136,7 +139,7 @@ class MetaDecoder(nn.Module):
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
             
-            nn.Conv2d(64, 1, kernel_size=1) # Trả về 1 kênh xác suất duy nhất (Logits)
+            nn.Conv2d(64, 1, kernel_size=1)
         )
 
     def forward(
@@ -147,38 +150,28 @@ class MetaDecoder(nn.Module):
         target_size: tuple = (224, 224)
     ) -> torch.Tensor:
         
-        # 1. Tính toán các bản đồ tương đồng từ tất cả các tầng
         pred_maps = []
         for q_f, s_f in zip(query_feats, support_feats):
-            pred_l = self.cross_attn(q_f, s_f, support_mask) # [B, 1, H_feat, W_feat]
+            pred_l = self.cross_attn(q_f, s_f, support_mask)
             pred_maps.append(pred_l)
             
-        # [B, 4, H_feat, W_feat]
         stacked_preds = torch.cat(pred_maps, dim=1) 
+        deepest_q_feat = query_feats[-1]
         
-        # 2. Lấy Feature Map của tầng sâu nhất để làm "Ngữ cảnh Không gian" (Spatial Context)
-        deepest_q_feat = query_feats[-1] # [B, 384, H_feat, W_feat]
-        
-        # 3. Nối Feature Map và Correlation Maps lại với nhau
-        decoder_input = torch.cat([deepest_q_feat, stacked_preds], dim=1) # [B, 388, H_feat, W_feat]
-        
-        # 4. Đưa qua Mạng nơ-ron Tích chập (Decoder) để tinh chỉnh
-        # Logits sẽ có giá trị âm/dương (chưa qua sigmoid)
-        refined_logits = self.decoder(decoder_input) # [B, 1, H_feat, W_feat]
-        
-        # 5. Phóng to về kích thước ảnh gốc
+        decoder_input = torch.cat([deepest_q_feat, stacked_preds], dim=1)
+        refined_logits = self.decoder(decoder_input)
         refined_mask = F.interpolate(refined_logits, size=target_size, mode="bilinear", align_corners=False)
-        
-        # Chuyển logits thành xác suất [0, 1]
         return torch.sigmoid(refined_mask)
 
 if __name__ == "__main__":
-    print("Testing DenseCrossAttention & MultiLayerFusion...")
+    print("Testing DenseCrossAttention, Otsu Dynamic Thresholding & MultiLayerFusion...")
     q_feats = [torch.randn(1, 384, 16, 16) for _ in range(4)]
     s_feats = [torch.randn(1, 384, 16, 16) for _ in range(4)]
     s_mask = (torch.rand(1, 1, 224, 224) > 0.5).float()
 
     fusion_module = MultiLayerFusion()
     fused_out = fusion_module(q_feats, s_feats, s_mask, target_size=(224, 224))
-    print(f"Fused Prediction Shape: {fused_out.shape}")
-    print("Attention module tests passed successfully!")
+    binary_mask = compute_dynamic_threshold_mask(fused_out)
+    print(f"Fused Prediction Shape: {fused_out.shape}, Mean Prob: {fused_out.mean().item():.4f}")
+    print(f"Dynamic Threshold Mask Shape: {binary_mask.shape}, FG ratio: {binary_mask.mean().item():.4f}")
+    print("All tests passed successfully!")

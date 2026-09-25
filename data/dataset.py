@@ -144,7 +144,8 @@ class FSS1000Dataset(Dataset):
                 continue
 
             q_idx, s_idx = rng.sample(range(len(valid_pairs)), 2)
-            self.episodes.append((valid_pairs[q_idx], valid_pairs[s_idx]))
+            cls_idx = self.classes.index(cls_name)
+            self.episodes.append((valid_pairs[q_idx], valid_pairs[s_idx], cls_idx))
 
     def __len__(self):
         return len(self.episodes)
@@ -161,12 +162,13 @@ class FSS1000Dataset(Dataset):
         return (mask_t > 0.5).float()
 
     def __getitem__(self, idx):
-        (q_img_path, q_mask_path), (s_img_path, s_mask_path) = self.episodes[idx]
+        (q_img_path, q_mask_path), (s_img_path, s_mask_path), class_id = self.episodes[idx]
         return {
             "query_img": self._load_img(q_img_path),
             "query_mask": self._load_mask(q_mask_path),
             "support_img": self._load_img(s_img_path),
-            "support_mask": self._load_mask(s_mask_path)
+            "support_mask": self._load_mask(s_mask_path),
+            "class_id": class_id
         }
 
 class ISICDataset(Dataset):
@@ -215,7 +217,8 @@ class ISICDataset(Dataset):
             cat = rng.choice(available_cats)
             pairs = self.img_metadata[cat]
             q_idx, s_idx = rng.sample(range(len(pairs)), 2)
-            self.episodes.append((pairs[q_idx], pairs[s_idx]))
+            cat_idx = self.categories.index(cat)
+            self.episodes.append((pairs[q_idx], pairs[s_idx], cat_idx))
 
     def __len__(self):
         return len(self.episodes)
@@ -230,12 +233,13 @@ class ISICDataset(Dataset):
         return (mask_t > 0.5).float()
 
     def __getitem__(self, idx):
-        (q_img_path, q_mask_path), (s_img_path, s_mask_path) = self.episodes[idx]
+        (q_img_path, q_mask_path), (s_img_path, s_mask_path), class_id = self.episodes[idx]
         return {
             "query_img": self._load_img(q_img_path),
             "query_mask": self._load_mask(q_mask_path),
             "support_img": self._load_img(s_img_path),
-            "support_mask": self._load_mask(s_mask_path)
+            "support_mask": self._load_mask(s_mask_path),
+            "class_id": class_id
         }
 
 class SUIMDataset(Dataset):
@@ -284,7 +288,8 @@ class SUIMDataset(Dataset):
             cat = rng.choice(available_cats)
             pairs = self.img_metadata[cat]
             q_idx, s_idx = rng.sample(range(len(pairs)), 2)
-            self.episodes.append((pairs[q_idx], pairs[s_idx]))
+            cat_idx = self.categories.index(cat)
+            self.episodes.append((pairs[q_idx], pairs[s_idx], cat_idx))
 
     def __len__(self):
         return len(self.episodes)
@@ -299,12 +304,13 @@ class SUIMDataset(Dataset):
         return (mask_t > 0.5).float()
 
     def __getitem__(self, idx):
-        (q_img_path, q_mask_path), (s_img_path, s_mask_path) = self.episodes[idx]
+        (q_img_path, q_mask_path), (s_img_path, s_mask_path), class_id = self.episodes[idx]
         return {
             "query_img": self._load_img(q_img_path),
             "query_mask": self._load_mask(q_mask_path),
             "support_img": self._load_img(s_img_path),
-            "support_mask": self._load_mask(s_mask_path)
+            "support_mask": self._load_mask(s_mask_path),
+            "class_id": class_id
         }
 
 class LungDataset(Dataset):
@@ -346,7 +352,7 @@ class LungDataset(Dataset):
             
         for _ in range(num_episodes):
             q_idx, s_idx = rng.sample(range(len(valid_pairs)), 2)
-            self.episodes.append((valid_pairs[q_idx], valid_pairs[s_idx]))
+            self.episodes.append((valid_pairs[q_idx], valid_pairs[s_idx], 0))
 
     def __len__(self):
         return len(self.episodes)
@@ -361,12 +367,13 @@ class LungDataset(Dataset):
         return (mask_t > 0.5).float()
 
     def __getitem__(self, idx):
-        (q_img_path, q_mask_path), (s_img_path, s_mask_path) = self.episodes[idx]
+        (q_img_path, q_mask_path), (s_img_path, s_mask_path), class_id = self.episodes[idx]
         return {
             "query_img": self._load_img(q_img_path),
             "query_mask": self._load_mask(q_mask_path),
             "support_img": self._load_img(s_img_path),
-            "support_mask": self._load_mask(s_mask_path)
+            "support_mask": self._load_mask(s_mask_path),
+            "class_id": class_id
         }
 
 class DeepGlobeDataset(Dataset):
@@ -422,7 +429,8 @@ class DeepGlobeDataset(Dataset):
             cat = rng.choice(available_cats)
             pairs = self.img_metadata[cat]
             q_idx, s_idx = rng.sample(range(len(pairs)), 2)
-            self.episodes.append((pairs[q_idx], pairs[s_idx]))
+            cat_idx = self.categories.index(cat)
+            self.episodes.append((pairs[q_idx], pairs[s_idx], cat_idx))
 
     def __len__(self):
         return len(self.episodes)
@@ -437,11 +445,12 @@ class DeepGlobeDataset(Dataset):
         return (mask_t > 0.5).float()
 
     def __getitem__(self, idx):
-        (q_img_path, q_mask_path), (s_img_path, s_mask_path) = self.episodes[idx]
+        (q_img_path, q_mask_path), (s_img_path, s_mask_path), class_id = self.episodes[idx]
         return {
             "query_img": self._load_img(q_img_path),
             "query_mask": self._load_mask(q_mask_path),
             "support_img": self._load_img(s_img_path),
-            "support_mask": self._load_mask(s_mask_path)
+            "support_mask": self._load_mask(s_mask_path),
+            "class_id": class_id
         }
 

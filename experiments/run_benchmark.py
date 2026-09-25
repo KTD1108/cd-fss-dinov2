@@ -18,14 +18,14 @@ from core.attention import MetaDecoder
 from core.thresholding import otsu_thresholding
 from core.evaluator import Evaluator
 from data.transforms import RandomShearAugmentation
-from data.dataset import FSS1000Dataset
+from data.dataset import FSS1000Dataset, DeepGlobeDataset, ISICDataset, SUIMDataset, LungDataset
 from core.visualizer import save_prediction_visualization
 
-def run_benchmark(num_episodes: int = 10, dataset_root: str = None, config_path: str = "config/default_config.yaml"):
+def run_benchmark(num_episodes: int = 10, dataset_root: str = None, dataset_name: str = "fss", config_path: str = "config/default_config.yaml"):
     print("=" * 65)
     print(f"BẮT ĐẦU CHẠY BENCHMARK DINOv2 + TTA CHO {num_episodes} EPISODES")
     if dataset_root and os.path.exists(dataset_root):
-        print(f"Nguồn dữ liệu: {dataset_root}")
+        print(f"Nguồn dữ liệu: {dataset_root} (Loại: {dataset_name})")
     else:
         print("Nguồn dữ liệu: Giả lập (Synthetic Random Episodes)")
     print("=" * 65)
@@ -41,11 +41,22 @@ def run_benchmark(num_episodes: int = 10, dataset_root: str = None, config_path:
     if dataset_root and os.path.exists(dataset_root):
         try:
             img_size = cfg["dataset"]["img_size"]
-            # Chỉ test trên 240 classes thuộc tập 'test' để đảm bảo không bị rò rỉ dữ liệu (data leakage)
-            real_dataset = FSS1000Dataset(root_dir=dataset_root, num_episodes=num_episodes, img_size=img_size, split='test')
-            print(f"Đã khởi tạo thành công FSS1000Dataset (Tập Test) với {len(real_dataset)} episodes thực tế (Size {img_size}x{img_size})!")
+            if dataset_name.lower() == "fss":
+                real_dataset = FSS1000Dataset(root_dir=dataset_root, num_episodes=num_episodes, img_size=img_size, split='test')
+            elif dataset_name.lower() == "deepglobe":
+                real_dataset = DeepGlobeDataset(root_dir=dataset_root, num_episodes=num_episodes, img_size=img_size)
+            elif dataset_name.lower() == "isic":
+                real_dataset = ISICDataset(root_dir=dataset_root, num_episodes=num_episodes, img_size=img_size)
+            elif dataset_name.lower() == "suim":
+                real_dataset = SUIMDataset(root_dir=dataset_root, num_episodes=num_episodes, img_size=img_size)
+            elif dataset_name.lower() == "lung":
+                real_dataset = LungDataset(root_dir=dataset_root, num_episodes=num_episodes, img_size=img_size)
+            else:
+                raise ValueError(f"Không hỗ trợ dataset_name: {dataset_name}")
+                
+            print(f"Đã khởi tạo thành công {real_dataset.__class__.__name__} với {len(real_dataset)} episodes thực tế!")
         except Exception as e:
-            print(f"⚠️ Không thể khởi tạo FSS1000Dataset ({e}), chuyển sang chế độ giả lập.")
+            print(f"⚠️ Không thể khởi tạo Dataset ({e}), chuyển sang chế độ giả lập.")
 
     # Load Backbone (eval mode, frozen)
     backbone = DINOv2Backbone(
@@ -192,9 +203,15 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Run Benchmark for CD-FSS DINOv2")
     parser.add_argument("--episodes", type=int, default=5, help="Số lượng episodes thử nghiệm")
-    parser.add_argument("--dataset_root", type=str, default=None, help="Đường dẫn root tới dataset (ví dụ FSS-1000)")
+    parser.add_argument("--dataset_root", type=str, default=None, help="Đường dẫn root tới dataset")
+    parser.add_argument("--dataset_name", type=str, default="fss", choices=["fss", "deepglobe", "isic", "suim", "lung"], help="Tên bộ dữ liệu")
     parser.add_argument("--config", type=str, default="config/default_config.yaml", help="Đường dẫn file config")
     args = parser.parse_args()
 
-    run_benchmark(num_episodes=args.episodes, dataset_root=args.dataset_root, config_path=args.config)
+    run_benchmark(
+        num_episodes=args.episodes, 
+        dataset_root=args.dataset_root, 
+        dataset_name=args.dataset_name,
+        config_path=args.config
+    )
 

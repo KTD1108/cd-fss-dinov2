@@ -1,31 +1,26 @@
 import torch
 import torch.nn as nn
-from typing import List
+from core.contrastive_head import ContrastiveFeatureTransformer, ClassContrastiveAdapters
 
 class ConvAdapterBlock(nn.Module):
     """
-    Adapter 1x1 Conv Bottleneck cho một tầng feature map.
-    Mô hình: 1x1 Conv -> BN -> ReLU -> 1x1 Conv -> BN
-    Residual connection: output = input + adapter(input)
-    Đặc biệt: Khởi tạo Zero-Init ở lớp conv cuối giúp bảo toàn 100% đặc trưng ban đầu của DINOv2.
+    Adapter Bottleneck 1x1 Conv cho một tầng feature map với GroupNorm và Residual connection.
     """
     def __init__(self, in_dim: int, adapter_dim: int = 64):
         super().__init__()
         self.conv1 = nn.Conv2d(in_dim, adapter_dim, kernel_size=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(adapter_dim)
+        self.gn1 = nn.GroupNorm(8, adapter_dim)
         self.relu = nn.ReLU(inplace=True)
         self.conv2 = nn.Conv2d(adapter_dim, in_dim, kernel_size=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(in_dim)
+        self.gn2 = nn.GroupNorm(8, in_dim)
 
-        # 🌟 ZERO-INITIALIZATION: Đảm bảo tại bước 0 (trước TTA), adapter(x) = 0.
-        # Đầu ra ban đầu = x + 0 = x, không làm hỏng không gian biểu diễn hoàn hảo của DINOv2.
+        # Zero-init
         nn.init.zeros_(self.conv2.weight)
-        nn.init.zeros_(self.bn2.weight)
-        nn.init.zeros_(self.bn2.bias)
+        nn.init.zeros_(self.gn2.weight)
+        nn.init.zeros_(self.gn2.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        residual = self.bn2(self.conv2(self.relu(self.bn1(self.conv1(x)))))
-        return x + residual
+        return x + self.gn2(self.conv2(self.relu(self.gn1(self.conv1(x)))))
 
 class MultiLevelAdapters(nn.Module):
     """
@@ -37,22 +32,15 @@ class MultiLevelAdapters(nn.Module):
             ConvAdapterBlock(in_dim, adapter_dim) for _ in range(num_levels)
         ])
 
-    def forward(self, features: List[torch.Tensor]) -> List[torch.Tensor]:
-        """
-        Nhận danh sách các feature maps từ DINOv2 và áp dụng Adapter từng tầng.
-        """
-        adapted_features = []
-        for feat, adapter in zip(features, self.adapters):
-            adapted_features.append(adapter(feat))
-        return adapted_features
+    def forward(self, features):
+        return [adapter(feat) for feat, adapter in zip(features, self.adapters)]
 
 if __name__ == "__main__":
-    print("Testing MultiLevelAdapters module...")
-    dummy_feats = [torch.randn(1, 384, 16, 16) for _ in range(4)]
-    adapters = MultiLevelAdapters(num_levels=4, in_dim=384, adapter_dim=64)
-    out_feats = adapters(dummy_feats)
-    # Kiểm tra xem zero-init có cho kết quả bằng hệt đầu vào ban đầu không
-    diff = sum([(out - inp).abs().max().item() for out, inp in zip(out_feats, dummy_feats)])
-    print(f"Zero-init difference from input: {diff:.6f} (Expected: 0.000000)")
-    assert diff < 1e-6, "Error: Zero-init is not exact!"
-    print("Adapter test passed successfully!")
+    print("Testing models/adapter.py...")
+    adapters = MultiLevelAdapters(4, 384, 64)
+    dummy_feats = [torch.randn(1, 384, 14, 14) for _ in range(4)]
+    out = adapters(dummy_feats)
+    diff = sum([(o - i).abs().max().item() for o, i in zip(out, dummy_feats)])
+    print(f"Zero-init max deviation: {diff:.6f}")
+    assert diff < 1e-6
+    print("Adapter test passed!")

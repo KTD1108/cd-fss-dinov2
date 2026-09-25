@@ -72,17 +72,19 @@ class ContrastiveFeatureTransformer(nn.Module):
     """
     Projector Head chiếu đặc trưng DINOv2 (384) xuống không gian biểu diễn (64)
     được tối ưu hóa qua cơ chế Adapt Before Comparison.
+    Sử dụng GroupNorm thay cho BatchNorm để hoàn toàn miễn nhiễm với hiện tượng 
+    lệch running stats khi thích nghi Test-Time trên Batch Size = 1.
     """
     def __init__(self, in_channels: int = 384, out_channels: int = 64):
         super().__init__()
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.gn1 = nn.GroupNorm(num_groups=8, num_channels=out_channels)
         self.relu = nn.ReLU(inplace=True)
         self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(out_channels)
+        self.gn2 = nn.GroupNorm(num_groups=8, num_channels=out_channels)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.bn2(self.conv2(self.relu(self.bn1(self.conv1(x)))))
+        return self.gn2(self.conv2(self.relu(self.gn1(self.conv1(x)))))
 
 class ClassContrastiveAdapters:
     """

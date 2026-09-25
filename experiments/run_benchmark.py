@@ -12,7 +12,8 @@ if hasattr(sys.stdout, "reconfigure"):
 from models.dinov2_backbone import DINOv2Backbone
 from models.crf_refinement import DenseCRFRefinement
 from core.contrastive_head import ClassContrastiveAdapters
-from core.attention import MetaDecoder, MultiLayerFusion, compute_dynamic_threshold_mask
+from core.attention import MultiLayerFusion
+from core.thresholding import compute_adaptive_threshold_mask
 from core.guided_filter import FastGuidedFilter
 from core.evaluator import Evaluator
 from data.transforms import RandomShearAugmentation
@@ -83,7 +84,7 @@ def run_benchmark(
     ).to(device)
 
     augmentation = RandomShearAugmentation()
-    guided_filter = FastGuidedFilter(r=4, eps=1e-3).to(device)
+    guided_filter = FastGuidedFilter(r=4, eps=1e-2, blend_alpha=0.5).to(device)
     
     # Quản lý Adapter theo từng Class ID (chuẩn bài báo ABCDFSS)
     class_adapters = ClassContrastiveAdapters(
@@ -95,18 +96,12 @@ def run_benchmark(
         epochs=cfg["tta"]["epochs"]
     )
 
-    if use_meta_decoder:
-        fusion_module = MetaDecoder(in_channels=384, num_layers=4).to(device)
-        weight_path = "models/weights/meta_decoder_best.pth"
-        if os.path.exists(weight_path):
-            fusion_module.load_state_dict(torch.load(weight_path, map_location=device))
-            print("✅ Đang sử dụng chế độ: META-DECODER (Đã nạp trọng số học thuật)")
-        else:
-            print("⚠️ CẢNH BÁO: Không tìm thấy trọng số MetaDecoder. Đang chạy với trọng số ngẫu nhiên!")
-        fusion_module.eval()
-    else:
-        fusion_module = MultiLayerFusion(layer_weights=[0.25, 0.25, 0.25, 0.25], normalize=True, temperature=0.15).to(device)
-        print("✅ Đang sử dụng chế độ: MULTI-LAYER DENSE AFFINITY (Cosine Scaled)")
+    fusion_module = MultiLayerFusion(
+        layer_weights=[0.25, 0.25, 0.25, 0.25], 
+        temperature=0.15,
+        proto_ratio=0.5
+    ).to(device)
+    print("✅ Đang sử dụng chế độ: MULTI-LAYER DUAL CROSS-ATTENTION (FG/BG Density Matching)")
         
     crf_refiner = DenseCRFRefinement()
 
@@ -186,8 +181,8 @@ def run_benchmark(
             else:
                 refined_prob = pred_prob_map
 
-            # 🔥 Dynamic Otsu Thresholding chuẩn hóa Min-Max
-            pred_bin_mask = compute_dynamic_threshold_mask(refined_prob)
+            # 🛡️ Dynamic Adaptive Thresholding (Otsu + Mean Safeguard + Sanity Guard)
+            pred_bin_mask = compute_adaptive_threshold_mask(refined_prob)
 
             if use_crf:
                 img_np = (query_img[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)

@@ -8,10 +8,11 @@ class FastGuidedFilter(nn.Module):
     Sử dụng ảnh gốc RGB làm guidance map để nắn và làm sắc nét ranh giới vật thể 
     từ bản đồ xác suất thô của DINOv2 mà không cần cài thêm pydensecrf.
     """
-    def __init__(self, r: int = 4, eps: float = 1e-2):
+    def __init__(self, r: int = 4, eps: float = 1e-2, blend_alpha: float = 0.5):
         super().__init__()
         self.r = r
         self.eps = eps
+        self.blend_alpha = blend_alpha
 
     def forward(self, rgb_guidance: torch.Tensor, coarse_prob: torch.Tensor) -> torch.Tensor:
         """
@@ -41,7 +42,8 @@ class FastGuidedFilter(nn.Module):
         mean_b = F.avg_pool2d(b, k, stride=1, padding=self.r)
 
         q = mean_a * I + mean_b
-        return q.clamp(0.0, 1.0)
+        q_clamped = q.clamp(0.0, 1.0)
+        return (1.0 - self.blend_alpha) * p + self.blend_alpha * q_clamped
 
 if __name__ == "__main__":
     gf = FastGuidedFilter()

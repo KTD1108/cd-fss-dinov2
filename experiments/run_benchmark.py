@@ -120,7 +120,21 @@ def run_benchmark(num_episodes: int = 10, dataset_root: str = None, dataset_name
             support_img = torch.randn(1, 3, img_size, img_size).to(device)
             support_mask = (torch.rand(1, 1, img_size, img_size) > 0.6).float().to(device)
 
-        # 3. Test-Time Adaptation Loop
+        # 3. Tạo Nhãn Giả (Pseudo-Label) bằng Zero-Shot trước khi TTA
+        adapters.eval()
+        with torch.no_grad():
+            img_size = cfg["dataset"]["img_size"]
+            q_raw = adapters(backbone(query_img))
+            s_raw = adapters(backbone(support_img))
+            pseudo_pred = fusion_module(q_raw, s_raw, support_mask, target_size=(img_size, img_size))
+            
+            # Lọc các pixel chắc chắn (Confident Pixels)
+            pseudo_mask = torch.zeros_like(pseudo_pred)
+            pseudo_mask[pseudo_pred > 0.6] = 1.0
+            pseudo_mask[pseudo_pred < 0.4] = 0.0
+            valid_pixels = ((pseudo_pred > 0.6) | (pseudo_pred < 0.4)).float()
+
+        # 4. Test-Time Adaptation Loop với Self-Training
         adapters.train()
         for epoch in range(cfg["tta"]["epochs"]):
             optimizer.zero_grad()
@@ -153,10 +167,17 @@ def run_benchmark(num_episodes: int = 10, dataset_root: str = None, dataset_name
                               w_cfg["w_p"] * loss_p_l)
 
             # Thêm Self-Attention Loss: Khả năng tự tái tạo lại Support Mask của Support Features
-            img_size = cfg["dataset"]["img_size"]
+            # Thêm Self-Attention Loss: Khả năng tự tái tạo lại Support Mask của Support Features
             pred_s_self = fusion_module(s_adapted, s_adapted, support_mask, target_size=(img_size, img_size))
             loss_self_attn = torch.nn.functional.binary_cross_entropy(pred_s_self.clamp(1e-6, 1-1e-6), support_mask.float())
             total_loss += w_cfg.get("w_self_attn", 2.0) * loss_self_attn
+
+            # 🔥 ĐÓNG GÓP MỚI: Pseudo-Label Self-Training Loss cho Query
+            pred_q_pseudo = fusion_module(q_adapted, s_adapted, support_mask, target_size=(img_size, img_size))
+            bce_loss = torch.nn.functional.binary_cross_entropy(pred_q_pseudo.clamp(1e-6, 1-1e-6), pseudo_mask, reduction='none')
+            # Chỉ phạt trên các pixel mà model ban đầu đã rất tự tin
+            loss_pseudo = (bce_loss * valid_pixels).sum() / (valid_pixels.sum() + 1e-8)
+            total_loss += 5.0 * loss_pseudo  # Trọng số khá lớn để ép model học Query Domain
 
             total_loss.backward()
             optimizer.step()

@@ -23,8 +23,18 @@ class DenseCrossAttention(nn.Module):
         """
         B, C, H, W = query_feat.shape
 
+        # 🔥 THUẬT TOÁN ĐỘT PHÁ: Adapt Before Comparison bằng AdaIN (Adaptive Instance Normalization)
+        # Căn chỉnh hoàn toàn không gian màu/kết cấu (Style) của Query sang Support Domain
+        q_mean = query_feat.mean(dim=(2, 3), keepdim=True)
+        q_std = query_feat.std(dim=(2, 3), keepdim=True) + 1e-5
+        s_mean = support_feat.mean(dim=(2, 3), keepdim=True)
+        s_std = support_feat.std(dim=(2, 3), keepdim=True) + 1e-5
+        
+        # Biến đổi Query
+        query_feat_adapted = ((query_feat - q_mean) / q_std) * s_std + s_mean
+
         # Reshape Q, K về [B, N, C] với N = H * W
-        Q = query_feat.flatten(2).permute(0, 2, 1) # [B, N, C]
+        Q = query_feat_adapted.flatten(2).permute(0, 2, 1) # [B, N, C]
         K = support_feat.flatten(2)                # [B, C, N]
 
         # Rescale & Normalization (Cosine similarity)

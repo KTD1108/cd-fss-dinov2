@@ -14,7 +14,7 @@ from models.dinov2_backbone import DINOv2Backbone
 from models.adapter import MultiLevelAdapters
 from models.crf_refinement import DenseCRFRefinement
 from core.losses import DenseContrastiveLoss, FeatureStatLoss, PrototypeAlignmentLoss
-from core.attention import MultiLayerFusion
+from core.attention import MetaDecoder
 from core.thresholding import otsu_thresholding
 from core.evaluator import Evaluator
 from data.transforms import RandomShearAugmentation
@@ -41,8 +41,9 @@ def run_benchmark(num_episodes: int = 10, dataset_root: str = None, config_path:
     if dataset_root and os.path.exists(dataset_root):
         try:
             img_size = cfg["dataset"]["img_size"]
-            real_dataset = FSS1000Dataset(root_dir=dataset_root, num_episodes=num_episodes, img_size=img_size)
-            print(f"Đã khởi tạo thành công FSS1000Dataset với {len(real_dataset)} episodes thực tế (Size {img_size}x{img_size})!")
+            # Chỉ test trên 240 classes thuộc tập 'test' để đảm bảo không bị rò rỉ dữ liệu (data leakage)
+            real_dataset = FSS1000Dataset(root_dir=dataset_root, num_episodes=num_episodes, img_size=img_size, split='test')
+            print(f"Đã khởi tạo thành công FSS1000Dataset (Tập Test) với {len(real_dataset)} episodes thực tế (Size {img_size}x{img_size})!")
         except Exception as e:
             print(f"⚠️ Không thể khởi tạo FSS1000Dataset ({e}), chuyển sang chế độ giả lập.")
 
@@ -56,7 +57,17 @@ def run_benchmark(num_episodes: int = 10, dataset_root: str = None, config_path:
     l_stat = FeatureStatLoss().to(device)
     l_p = PrototypeAlignmentLoss().to(device)
     augmentation = RandomShearAugmentation()
-    fusion_module = MultiLayerFusion().to(device)
+    
+    # 🌟 Sử dụng MetaDecoder (có trọng số) thay vì MultiLayerFusion
+    fusion_module = MetaDecoder(in_channels=384, num_layers=4).to(device)
+    weight_path = "models/weights/meta_decoder_best.pth"
+    if os.path.exists(weight_path):
+        fusion_module.load_state_dict(torch.load(weight_path, map_location=device))
+        print("✅ Đã tải thành công trọng số MetaDecoder từ quá trình Meta-Training!")
+    else:
+        print("⚠️ CẢNH BÁO: Không tìm thấy trọng số MetaDecoder. Đang chạy với trọng số ngẫu nhiên!")
+    fusion_module.eval() # Khóa trọng số trong lúc Test-Time Adaptation
+    
     crf_refiner = DenseCRFRefinement()
 
     overall_evaluator = Evaluator()

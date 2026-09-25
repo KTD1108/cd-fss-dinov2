@@ -14,7 +14,7 @@ from models.dinov2_backbone import DINOv2Backbone
 from models.adapter import MultiLevelAdapters
 from models.crf_refinement import DenseCRFRefinement
 from core.losses import DenseContrastiveLoss, FeatureStatLoss, PrototypeAlignmentLoss
-from core.attention import MultiLayerFusion
+from core.attention import MetaDecoder
 from core.thresholding import otsu_thresholding
 from core.evaluator import Evaluator
 from data.transforms import RandomShearAugmentation
@@ -56,7 +56,16 @@ def run_single_episode(config_path: str = "config/default_config.yaml"):
     )
 
     augmentation = RandomShearAugmentation()
-    fusion_module = MultiLayerFusion().to(device)
+    
+    fusion_module = MetaDecoder(in_channels=384, num_layers=4).to(device)
+    weight_path = "models/weights/meta_decoder_best.pth"
+    if os.path.exists(weight_path):
+        fusion_module.load_state_dict(torch.load(weight_path, map_location=device))
+        print("✅ Đã tải thành công trọng số MetaDecoder từ quá trình Meta-Training!")
+    else:
+        print("⚠️ CẢNH BÁO: Không tìm thấy trọng số MetaDecoder. Đang chạy với trọng số ngẫu nhiên!")
+    fusion_module.eval()
+    
     crf_refiner = DenseCRFRefinement()
     evaluator = Evaluator()
 

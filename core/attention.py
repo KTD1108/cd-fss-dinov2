@@ -6,12 +6,10 @@ import math
 import cv2
 import numpy as np
 
-def compute_dynamic_threshold_mask(prob_map: torch.Tensor, drop_least: float = 0.05) -> torch.Tensor:
+def compute_dynamic_threshold_mask(prob_map: torch.Tensor) -> torch.Tensor:
     """
-    Áp dụng thuật toán Otsu Dynamic Thresholding kết hợp ràng buộc pred_mean (giống chuẩn ABCDFSS).
-    Thay vì dùng ngưỡng cố định 0.5 (gây ra tràn False Positive làm tụt Background IoU),
-    thuật toán này tự động tìm điểm phân tách tối ưu giữa Foreground và Background cho từng ảnh cụ thể:
-        thresh = max(otsu_thresh, mean_prob)
+    Chuẩn hóa Min-Max và áp dụng Otsu Dynamic Thresholding.
+    Tránh hiện tượng sập về 0% khi ảnh support có ít pixel foreground làm tỷ lệ kích hoạt bị thu nhỏ.
     
     prob_map: [B, 1, H, W] hoặc [H, W] nằm trong dải [0, 1]
     Returns:
@@ -26,31 +24,24 @@ def compute_dynamic_threshold_mask(prob_map: torch.Tensor, drop_least: float = 0
     binary_masks = []
 
     for i in range(B):
-        img_np = prob_map[i, 0].detach().cpu().numpy()
-        npmin, npmax = float(img_np.min()), float(img_np.max())
-        
-        # Nếu khoảng giá trị quá hẹp (ảnh toàn nền hoặc không có kích hoạt)
-        if npmax - npmin < 1e-6:
+        p = prob_map[i, 0].detach().cpu().numpy()
+        p_min, p_max = float(p.min()), float(p.max())
+        if p_max - p_min < 1e-6:
             binary_masks.append(torch.zeros((1, H, W), device=prob_map.device))
             continue
 
-        norm_img = ((img_np - npmin) / (npmax - npmin + 1e-8) * 255.0).astype(np.uint8)
-        truncated = norm_img[norm_img >= int(255.0 * drop_least)]
-        if len(truncated) == 0:
-            truncated = norm_img
+        # Chuẩn hóa min-max để mở rộng toàn bộ dải động về [0, 1]
+        p_norm = (p - p_min) / (p_max - p_min + 1e-8)
+        norm_uint8 = (p_norm * 255.0).astype(np.uint8)
 
-        # Tính ngưỡng Otsu
-        thresh_val, _ = cv2.threshold(truncated, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        thresh_orig = (float(thresh_val) / 255.0) * (npmax - npmin) + npmin
+        # Tính ngưỡng Otsu tự động
+        thresh_val, _ = cv2.threshold(norm_uint8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        thresh_otsu = thresh_val / 255.0
 
-        # Ràng buộc pred_mean: vật thể foreground bắt buộc phải có độ tương đồng cao hơn trung bình toàn ảnh
-        final_thresh = max(thresh_orig, float(img_np.mean()))
+        # Ràng buộc an toàn: không để ngưỡng quá cực đoan
+        thresh = float(np.clip(thresh_otsu, 0.25, 0.75))
 
-        # Phòng ngừa ngưỡng quá cao làm biến mất toàn bộ dự đoán
-        if final_thresh >= npmax - 1e-4:
-            final_thresh = (npmin + npmax) / 2.0
-
-        mask_np = (img_np > final_thresh).astype(np.float32)
+        mask_np = (p_norm > thresh).astype(np.float32)
         binary_masks.append(torch.from_numpy(mask_np).unsqueeze(0).to(prob_map.device))
 
     return torch.stack(binary_masks, dim=0)
@@ -60,7 +51,7 @@ class DenseCrossAttention(nn.Module):
     Tính Dense Cross-Attention giữa Query Feature Map và Support Feature Map
     dựa trên Support Mask theo cơ chế Dense Affinity Matrix.
     """
-    def __init__(self, normalize: bool = False, temperature: float = 0.2):
+    def __init__(self, normalize: bool = True, temperature: float = 0.15):
         super().__init__()
         self.normalize = normalize
         self.temperature = temperature
@@ -104,7 +95,7 @@ class MultiLayerFusion(nn.Module):
     """
     Nội suy các correlation/pred maps từ nhiều tầng về kích thước ảnh gốc và lấy trung bình có trọng số.
     """
-    def __init__(self, layer_weights: List[float] = [0.25, 0.25, 0.25, 0.25], normalize: bool = False, temperature: float = 0.2):
+    def __init__(self, layer_weights: List[float] = [0.25, 0.25, 0.25, 0.25], normalize: bool = True, temperature: float = 0.15):
         super().__init__()
         self.cross_attn = DenseCrossAttention(normalize=normalize, temperature=temperature)
         weights_tensor = torch.tensor(layer_weights, dtype=torch.float32)
@@ -175,8 +166,8 @@ class MetaDecoder(nn.Module):
 
 if __name__ == "__main__":
     print("Testing DenseCrossAttention, Otsu Dynamic Thresholding & MultiLayerFusion...")
-    q_feats = [torch.randn(1, 64, 16, 16) for _ in range(4)]
-    s_feats = [torch.randn(1, 64, 16, 16) for _ in range(4)]
+    q_feats = [torch.randn(1, 384, 16, 16) for _ in range(4)]
+    s_feats = [torch.randn(1, 384, 16, 16) for _ in range(4)]
     s_mask = (torch.rand(1, 1, 224, 224) > 0.5).float()
 
     fusion_module = MultiLayerFusion()

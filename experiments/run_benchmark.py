@@ -13,6 +13,7 @@ from models.dinov2_backbone import DINOv2Backbone
 from models.crf_refinement import DenseCRFRefinement
 from core.contrastive_head import ClassContrastiveAdapters
 from core.attention import MetaDecoder, MultiLayerFusion, compute_dynamic_threshold_mask
+from core.guided_filter import FastGuidedFilter
 from core.evaluator import Evaluator
 from data.transforms import RandomShearAugmentation
 from data.dataset import FSS1000Dataset, DeepGlobeDataset, ISICDataset, SUIMDataset, LungDataset
@@ -25,21 +26,27 @@ def run_benchmark(
     config_path: str = "config/default_config.yaml",
     use_meta_decoder: bool = False,
     use_crf: bool = False,
-    adapt_to: str = "first-episode"  # 'first-episode', 'every-episode', 'none'
+    use_guided_filter: bool = True,
+    adapt_to: str = "none",  # 'first-episode', 'every-episode', 'none'
+    img_size: int = None
 ):
     print("=" * 65)
-    mode_name = "META-TRAINED DECODER" if use_meta_decoder else "ZERO-SHOT / TTA PROJECTOR"
+    mode_name = "META-TRAINED DECODER" if use_meta_decoder else "MULTI-LAYER ZERO-SHOT"
     print(f"BẮT ĐẦU CHẠY BENCHMARK DINOv2 ({mode_name}) CHO {num_episodes} EPISODES")
     if dataset_root and os.path.exists(dataset_root):
         print(f"Nguồn dữ liệu: {dataset_root} (Loại: {dataset_name})")
     else:
         print("Nguồn dữ liệu: Giả lập (Synthetic Random Episodes)")
-    print(f"Hậu xử lý CRF: {'BẬT' if use_crf else 'TẮT (Dùng Otsu pred_mean chuẩn ABCDFSS)'}")
+    print(f"Làm sắc nét viền (Guided Filter): {'BẬT' if use_guided_filter else 'TẮT'}")
     print(f"Chế độ Thích nghi (Adaptation): {adapt_to.upper()}")
     print("=" * 65)
 
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
+
+    if img_size is None:
+        img_size = cfg["dataset"].get("img_size", 392)
+    print(f"Kích thước ảnh xử lý: {img_size}x{img_size} (Feature Map: {img_size//14}x{img_size//14} tokens)")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Thiết bị sử dụng: {device}")
@@ -52,7 +59,6 @@ def run_benchmark(
     real_dataset = None
     if dataset_root and os.path.exists(dataset_root):
         try:
-            img_size = cfg["dataset"]["img_size"]
             if dataset_name.lower() == "fss":
                 real_dataset = FSS1000Dataset(root_dir=dataset_root, num_episodes=num_episodes, img_size=img_size, split='test')
             elif dataset_name.lower() == "deepglobe":
@@ -77,6 +83,7 @@ def run_benchmark(
     ).to(device)
 
     augmentation = RandomShearAugmentation()
+    guided_filter = FastGuidedFilter(r=4, eps=1e-3).to(device)
     
     # Quản lý Adapter theo từng Class ID (chuẩn bài báo ABCDFSS)
     class_adapters = ClassContrastiveAdapters(
@@ -98,15 +105,18 @@ def run_benchmark(
             print("⚠️ CẢNH BÁO: Không tìm thấy trọng số MetaDecoder. Đang chạy với trọng số ngẫu nhiên!")
         fusion_module.eval()
     else:
-        # Khi sử dụng Projector 64 chiều, dùng phép đo Cosine/Scaled Dot Product Q @ K.T / sqrt(C)
-        fusion_module = MultiLayerFusion(layer_weights=[0.25, 0.25, 0.25, 0.25], normalize=False).to(device)
-        print("✅ Đang sử dụng chế độ: MULTI-LAYER DENSE AFFINITY (Chuẩn ABCDFSS)")
+        fusion_module = MultiLayerFusion(layer_weights=[0.25, 0.25, 0.25, 0.25], normalize=True, temperature=0.15).to(device)
+        print("✅ Đang sử dụng chế độ: MULTI-LAYER DENSE AFFINITY (Cosine Scaled)")
         
     crf_refiner = DenseCRFRefinement()
 
     overall_evaluator = Evaluator(num_classes=num_classes)
     episode_mious = []
     episode_fb_ious = []
+
+    # Chuẩn hóa ảnh RGB phục vụ Guided Filter
+    mean_t = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(device)
+    std_t = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to(device)
 
     for ep in range(1, num_episodes + 1):
         # 1. Nạp dữ liệu 1-shot episode (Query & Support) từ Dataset thực hoặc Giả lập
@@ -119,7 +129,6 @@ def run_benchmark(
             support_mask = data["support_mask"].unsqueeze(0).to(device)
             class_id = data.get("class_id", class_id)
         else:
-            img_size = cfg["dataset"]["img_size"]
             query_img = torch.randn(1, 3, img_size, img_size).to(device)
             query_gt = (torch.rand(1, 1, img_size, img_size) > 0.6).float().to(device)
             support_img = torch.randn(1, 3, img_size, img_size).to(device)
@@ -130,7 +139,7 @@ def run_benchmark(
             q_feats = backbone(query_img)
             s_feats = backbone(support_img)
 
-        # 3. Thích nghi theo lớp (Class-Wise Adaptation)
+        # 3. Thích nghi theo lớp (Class-Wise Adaptation) nếu bật
         final_loss_val = 0.0
         if adapt_to != "none":
             need_fit = False
@@ -162,21 +171,27 @@ def run_benchmark(
             q_final = class_adapters.transform(class_id, q_feats, device)
             s_final = class_adapters.transform(class_id, s_feats, device)
         else:
-            # Thuần Zero-Shot (không qua Projector)
+            # Thuần Zero-Shot
             q_final = q_feats
             s_final = s_feats
 
         # 4. Inference & Evaluate
         with torch.no_grad():
-            img_size = cfg["dataset"]["img_size"]
             pred_prob_map = fusion_module(q_final, s_final, support_mask, target_size=(img_size, img_size))
             
-            # 🔥 Dynamic Otsu Thresholding (chuẩn ABCDFSS pred_mean)
-            pred_bin_mask = compute_dynamic_threshold_mask(pred_prob_map)
+            # Làm sắc nét viền vật thể bằng Fast Guided Filter
+            if use_guided_filter:
+                rgb_raw = (query_img * std_t + mean_t).clamp(0.0, 1.0)
+                refined_prob = guided_filter(rgb_raw, pred_prob_map)
+            else:
+                refined_prob = pred_prob_map
+
+            # 🔥 Dynamic Otsu Thresholding chuẩn hóa Min-Max
+            pred_bin_mask = compute_dynamic_threshold_mask(refined_prob)
 
             if use_crf:
                 img_np = (query_img[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
-                prob_np = pred_prob_map[0, 0].cpu().numpy()
+                prob_np = refined_prob[0, 0].cpu().numpy()
                 crf_mask_np = crf_refiner(img_np, prob_np)
                 eval_mask = torch.from_numpy(crf_mask_np).unsqueeze(0).unsqueeze(0).to(device)
             else:
@@ -197,7 +212,7 @@ def run_benchmark(
                 save_path="experiments/sample_episode_viz.png"
             )
 
-        print(f"Episode [{ep:02d}/{num_episodes:02d}] (Class {class_id}) - FG-IoU: {ep_res['IoU_FG']*100:.2f}% | FB-IoU: {ep_res['FB-IoU']*100:.2f}% | Loss: {final_loss_val:.4f}")
+        print(f"Episode [{ep:02d}/{num_episodes:02d}] (Class {class_id}) - FG-IoU: {ep_res['IoU_FG']*100:.2f}% | FB-IoU: {ep_res['FB-IoU']*100:.2f}%")
 
     overall_res = overall_evaluator.compute()
     mean_ep_miou = np.mean(episode_mious) * 100
@@ -221,8 +236,10 @@ if __name__ == "__main__":
     parser.add_argument("--dataset_name", type=str, default="fss", choices=["fss", "deepglobe", "isic", "suim", "lung"], help="Tên bộ dữ liệu")
     parser.add_argument("--config", type=str, default="config/default_config.yaml", help="Đường dẫn file config")
     parser.add_argument("--use_meta_decoder", action="store_true", help="Bật cờ này để dùng MetaDecoder, nếu không sẽ dùng Zero-Shot")
-    parser.add_argument("--use_crf", action="store_true", help="Bật cờ này để dùng hậu xử lý CRF (mặc định tắt theo chuẩn ABCDFSS)")
-    parser.add_argument("--adapt_to", type=str, default="first-episode", choices=["first-episode", "every-episode", "none"], help="Cơ chế thích nghi (chuẩn ABCDFSS là first-episode)")
+    parser.add_argument("--use_crf", action="store_true", help="Bật cờ này để dùng hậu xử lý CRF")
+    parser.add_argument("--no_guided_filter", action="store_true", help="Tắt Guided Filter")
+    parser.add_argument("--adapt_to", type=str, default="none", choices=["first-episode", "every-episode", "none"], help="Cơ chế thích nghi")
+    parser.add_argument("--img_size", type=int, default=None, help="Kích thước ảnh (vd: 392 hoặc 518)")
     args = parser.parse_args()
 
     run_benchmark(
@@ -232,5 +249,7 @@ if __name__ == "__main__":
         config_path=args.config,
         use_meta_decoder=args.use_meta_decoder,
         use_crf=args.use_crf,
-        adapt_to=args.adapt_to
+        use_guided_filter=not args.no_guided_filter,
+        adapt_to=args.adapt_to,
+        img_size=args.img_size
     )

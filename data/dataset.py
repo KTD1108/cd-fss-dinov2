@@ -369,3 +369,79 @@ class LungDataset(Dataset):
             "support_mask": self._load_mask(s_mask_path)
         }
 
+class DeepGlobeDataset(Dataset):
+    """
+    Dataset loader cho ảnh vệ tinh DeepGlobe.
+    """
+    def __init__(self, root_dir: str, num_episodes: int = 100, img_size: int = 224, seed: int = 42):
+        import os, glob, random
+        import torchvision.transforms as T
+        from PIL import Image
+
+        self.root_dir = root_dir
+        self.img_size = img_size
+        self.categories = ['1', '2', '3', '4', '5', '6']
+
+        self.transform_img = T.Compose([
+            T.Resize((img_size, img_size)),
+            T.ToTensor(),
+            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+        self.transform_mask = T.Compose([
+            T.Resize((img_size, img_size), interpolation=T.InterpolationMode.NEAREST),
+            T.ToTensor()
+        ])
+
+        self.img_metadata = {}
+        for cat in self.categories:
+            origin_dir = os.path.join(self.root_dir, cat, 'test', 'origin')
+            gt_dir = os.path.join(self.root_dir, cat, 'test', 'groundtruth')
+            
+            if not os.path.exists(origin_dir):
+                continue
+                
+            img_paths = sorted(glob.glob(os.path.join(origin_dir, "*.jpg")))
+            valid_pairs = []
+            for img_path in img_paths:
+                img_name = os.path.basename(img_path).replace(".jpg", ".png")
+                mask_path = os.path.join(gt_dir, img_name)
+                if os.path.exists(mask_path):
+                    valid_pairs.append((img_path, mask_path))
+            
+            if len(valid_pairs) >= 2:
+                self.img_metadata[cat] = valid_pairs
+
+        rng = random.Random(seed)
+        self.episodes = []
+        available_cats = list(self.img_metadata.keys())
+        if not available_cats:
+            print(f"Warning: Không tìm thấy dữ liệu DeepGlobe tại {root_dir}")
+            return
+            
+        for _ in range(num_episodes):
+            cat = rng.choice(available_cats)
+            pairs = self.img_metadata[cat]
+            q_idx, s_idx = rng.sample(range(len(pairs)), 2)
+            self.episodes.append((pairs[q_idx], pairs[s_idx]))
+
+    def __len__(self):
+        return len(self.episodes)
+
+    def _load_img(self, path):
+        from PIL import Image
+        return self.transform_img(Image.open(path).convert("RGB"))
+
+    def _load_mask(self, path):
+        from PIL import Image
+        mask_t = self.transform_mask(Image.open(path).convert("L"))
+        return (mask_t > 0.5).float()
+
+    def __getitem__(self, idx):
+        (q_img_path, q_mask_path), (s_img_path, s_mask_path) = self.episodes[idx]
+        return {
+            "query_img": self._load_img(q_img_path),
+            "query_mask": self._load_mask(q_mask_path),
+            "support_img": self._load_img(s_img_path),
+            "support_mask": self._load_mask(s_mask_path)
+        }
+

@@ -213,12 +213,13 @@ class ISICDataset(Dataset):
             print(f"Warning: Không tìm thấy dữ liệu ISIC tại {root_dir}")
             return
             
-        for _ in range(num_episodes):
-            cat = rng.choice(available_cats)
+        for ep_idx in range(num_episodes):
+            cat_idx = ep_idx % len(available_cats)
+            cat = available_cats[cat_idx]
             pairs = self.img_metadata[cat]
             q_idx, s_idx = rng.sample(range(len(pairs)), 2)
-            cat_idx = self.categories.index(cat)
-            self.episodes.append((pairs[q_idx], pairs[s_idx], cat_idx))
+            actual_cat_idx = self.categories.index(cat)
+            self.episodes.append((pairs[q_idx], pairs[s_idx], actual_cat_idx))
 
     def __len__(self):
         return len(self.episodes)
@@ -284,12 +285,13 @@ class SUIMDataset(Dataset):
             print(f"Warning: Không tìm thấy dữ liệu SUIM tại {root_dir}")
             return
             
-        for _ in range(num_episodes):
-            cat = rng.choice(available_cats)
+        for ep_idx in range(num_episodes):
+            cat_idx = ep_idx % len(available_cats)
+            cat = available_cats[cat_idx]
             pairs = self.img_metadata[cat]
             q_idx, s_idx = rng.sample(range(len(pairs)), 2)
-            cat_idx = self.categories.index(cat)
-            self.episodes.append((pairs[q_idx], pairs[s_idx], cat_idx))
+            actual_cat_idx = self.categories.index(cat)
+            self.episodes.append((pairs[q_idx], pairs[s_idx], actual_cat_idx))
 
     def __len__(self):
         return len(self.episodes)
@@ -425,12 +427,13 @@ class DeepGlobeDataset(Dataset):
             print(f"Warning: Không tìm thấy dữ liệu DeepGlobe tại {root_dir}")
             return
             
-        for _ in range(num_episodes):
-            cat = rng.choice(available_cats)
+        for ep_idx in range(num_episodes):
+            cat_idx = ep_idx % len(available_cats)
+            cat = available_cats[cat_idx]
             pairs = self.img_metadata[cat]
             q_idx, s_idx = rng.sample(range(len(pairs)), 2)
-            cat_idx = self.categories.index(cat)
-            self.episodes.append((pairs[q_idx], pairs[s_idx], cat_idx))
+            actual_cat_idx = self.categories.index(cat)
+            self.episodes.append((pairs[q_idx], pairs[s_idx], actual_cat_idx))
 
     def __len__(self):
         return len(self.episodes)

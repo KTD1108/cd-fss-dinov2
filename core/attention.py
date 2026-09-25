@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import List
+import math
 import cv2
 import numpy as np
 
@@ -45,6 +46,10 @@ def compute_dynamic_threshold_mask(prob_map: torch.Tensor, drop_least: float = 0
         # Ràng buộc pred_mean: vật thể foreground bắt buộc phải có độ tương đồng cao hơn trung bình toàn ảnh
         final_thresh = max(thresh_orig, float(img_np.mean()))
 
+        # Phòng ngừa ngưỡng quá cao làm biến mất toàn bộ dự đoán
+        if final_thresh >= npmax - 1e-4:
+            final_thresh = (npmin + npmax) / 2.0
+
         mask_np = (img_np > final_thresh).astype(np.float32)
         binary_masks.append(torch.from_numpy(mask_np).unsqueeze(0).to(prob_map.device))
 
@@ -55,8 +60,9 @@ class DenseCrossAttention(nn.Module):
     Tính Dense Cross-Attention giữa Query Feature Map và Support Feature Map
     dựa trên Support Mask theo cơ chế Dense Affinity Matrix.
     """
-    def __init__(self, temperature: float = 0.1):
+    def __init__(self, normalize: bool = False, temperature: float = 0.2):
         super().__init__()
+        self.normalize = normalize
         self.temperature = temperature
 
     def forward(self, query_feat: torch.Tensor, support_feat: torch.Tensor, support_mask: torch.Tensor) -> torch.Tensor:
@@ -70,12 +76,17 @@ class DenseCrossAttention(nn.Module):
         """
         B, C, H, W = query_feat.shape
 
-        # Chuẩn hóa L2 dọc theo chiều channel để tính Cosine Correlation chính xác
-        Q = F.normalize(query_feat, dim=1).flatten(2).permute(0, 2, 1) # [B, HW, C]
-        K = F.normalize(support_feat, dim=1).flatten(2)                 # [B, C, HW]
+        if self.normalize:
+            Q = F.normalize(query_feat, dim=1).flatten(2).permute(0, 2, 1) # [B, HW, C]
+            K = F.normalize(support_feat, dim=1).flatten(2)                 # [B, C, HW]
+            scale = 1.0 / self.temperature
+        else:
+            Q = query_feat.flatten(2).permute(0, 2, 1) # [B, HW, C]
+            K = support_feat.flatten(2)                 # [B, C, HW]
+            scale = 1.0 / math.sqrt(C)
 
         # Ma trận tương quan Dense Affinity: [B, HW_query, HW_support]
-        affinity = torch.bmm(Q, K) / self.temperature
+        affinity = torch.bmm(Q, K) * scale
         attn = F.softmax(affinity, dim=-1) # Softmax trên toàn bộ không gian pixel support
 
         # Downsample support mask về kích thước feature (H, W)
@@ -93,9 +104,9 @@ class MultiLayerFusion(nn.Module):
     """
     Nội suy các correlation/pred maps từ nhiều tầng về kích thước ảnh gốc và lấy trung bình có trọng số.
     """
-    def __init__(self, layer_weights: List[float] = [0.1, 0.2, 0.35, 0.35], temperature: float = 0.1):
+    def __init__(self, layer_weights: List[float] = [0.25, 0.25, 0.25, 0.25], normalize: bool = False, temperature: float = 0.2):
         super().__init__()
-        self.cross_attn = DenseCrossAttention(temperature=temperature)
+        self.cross_attn = DenseCrossAttention(normalize=normalize, temperature=temperature)
         weights_tensor = torch.tensor(layer_weights, dtype=torch.float32)
         self.register_buffer("weights", weights_tensor / weights_tensor.sum())
 
@@ -114,7 +125,6 @@ class MultiLayerFusion(nn.Module):
             pred_l_upsampled = F.interpolate(pred_l, size=target_size, mode="bilinear", align_corners=False)
             pred_maps.append(pred_l_upsampled)
 
-        # Trọng số ưu tiên tầng ngữ nghĩa cao (Layer 8, 11)
         stacked_preds = torch.stack(pred_maps, dim=1) # [B, L, 1, H, W]
         w = self.weights.view(1, -1, 1, 1, 1).to(stacked_preds.device)
         fused_pred = (stacked_preds * w).sum(dim=1)
@@ -165,8 +175,8 @@ class MetaDecoder(nn.Module):
 
 if __name__ == "__main__":
     print("Testing DenseCrossAttention, Otsu Dynamic Thresholding & MultiLayerFusion...")
-    q_feats = [torch.randn(1, 384, 16, 16) for _ in range(4)]
-    s_feats = [torch.randn(1, 384, 16, 16) for _ in range(4)]
+    q_feats = [torch.randn(1, 64, 16, 16) for _ in range(4)]
+    s_feats = [torch.randn(1, 64, 16, 16) for _ in range(4)]
     s_mask = (torch.rand(1, 1, 224, 224) > 0.5).float()
 
     fusion_module = MultiLayerFusion()

@@ -3,7 +3,6 @@ import sys
 import yaml
 import torch
 import torch.nn.functional as F
-import torch.optim as optim
 import numpy as np
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -11,9 +10,8 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 from models.dinov2_backbone import DINOv2Backbone
-from models.adapter import MultiLevelAdapters
 from models.crf_refinement import DenseCRFRefinement
-from core.losses import DenseContrastiveLoss, FeatureStatLoss, PrototypeAlignmentLoss
+from core.contrastive_head import ClassContrastiveAdapters
 from core.attention import MetaDecoder, MultiLayerFusion, compute_dynamic_threshold_mask
 from core.evaluator import Evaluator
 from data.transforms import RandomShearAugmentation
@@ -27,17 +25,17 @@ def run_benchmark(
     config_path: str = "config/default_config.yaml",
     use_meta_decoder: bool = False,
     use_crf: bool = False,
-    skip_tta: bool = False
+    adapt_to: str = "first-episode"  # 'first-episode', 'every-episode', 'none'
 ):
     print("=" * 65)
-    mode_name = "META-TRAINED DECODER" if use_meta_decoder else "ZERO-SHOT (TRAINING-FREE)"
+    mode_name = "META-TRAINED DECODER" if use_meta_decoder else "ZERO-SHOT / TTA PROJECTOR"
     print(f"BẮT ĐẦU CHẠY BENCHMARK DINOv2 ({mode_name}) CHO {num_episodes} EPISODES")
     if dataset_root and os.path.exists(dataset_root):
         print(f"Nguồn dữ liệu: {dataset_root} (Loại: {dataset_name})")
     else:
         print("Nguồn dữ liệu: Giả lập (Synthetic Random Episodes)")
     print(f"Hậu xử lý CRF: {'BẬT' if use_crf else 'TẮT (Dùng Otsu pred_mean chuẩn ABCDFSS)'}")
-    print(f"Test-Time Adaptation (TTA): {'TẮT (Thuần Zero-Shot)' if skip_tta else 'BẬT'}")
+    print(f"Chế độ Thích nghi (Adaptation): {adapt_to.upper()}")
     print("=" * 65)
 
     with open(config_path, "r", encoding="utf-8") as f:
@@ -78,11 +76,18 @@ def run_benchmark(
         intermediate_layers=cfg["model"]["intermediate_layers"]
     ).to(device)
 
-    l_nce = DenseContrastiveLoss().to(device)
-    l_stat = FeatureStatLoss().to(device)
-    l_p = PrototypeAlignmentLoss().to(device)
     augmentation = RandomShearAugmentation()
     
+    # Quản lý Adapter theo từng Class ID (chuẩn bài báo ABCDFSS)
+    class_adapters = ClassContrastiveAdapters(
+        num_classes=num_classes,
+        num_layers=len(cfg["model"]["intermediate_layers"]),
+        in_dim=backbone.embed_dim,
+        out_dim=64,
+        lr=cfg["tta"]["lr"],
+        epochs=cfg["tta"]["epochs"]
+    )
+
     if use_meta_decoder:
         fusion_module = MetaDecoder(in_channels=384, num_layers=4).to(device)
         weight_path = "models/weights/meta_decoder_best.pth"
@@ -93,8 +98,9 @@ def run_benchmark(
             print("⚠️ CẢNH BÁO: Không tìm thấy trọng số MetaDecoder. Đang chạy với trọng số ngẫu nhiên!")
         fusion_module.eval()
     else:
-        fusion_module = MultiLayerFusion().to(device)
-        print("✅ Đang sử dụng chế độ: ZERO-SHOT (MultiLayerFusion - Kháng Domain Shift cực tốt)")
+        # Khi sử dụng Projector 64 chiều, dùng phép đo Cosine/Scaled Dot Product Q @ K.T / sqrt(C)
+        fusion_module = MultiLayerFusion(layer_weights=[0.25, 0.25, 0.25, 0.25], normalize=False).to(device)
+        print("✅ Đang sử dụng chế độ: MULTI-LAYER DENSE AFFINITY (Chuẩn ABCDFSS)")
         
     crf_refiner = DenseCRFRefinement()
 
@@ -103,29 +109,15 @@ def run_benchmark(
     episode_fb_ious = []
 
     for ep in range(1, num_episodes + 1):
-        # 1. Reset Adapters cho mỗi Episode mới (với Zero-Init để không làm hỏng đặc trưng gốc)
-        adapters = MultiLevelAdapters(
-            num_levels=len(cfg["model"]["intermediate_layers"]),
-            in_dim=backbone.embed_dim,
-            adapter_dim=cfg["model"]["adapter_channels"]
-        ).to(device)
-
-        optimizer = optim.SGD(
-            adapters.parameters(),
-            lr=cfg["tta"]["lr"],
-            momentum=cfg["tta"]["momentum"],
-            weight_decay=cfg["tta"]["weight_decay"]
-        )
-
-        # 2. Nạp dữ liệu 1-shot episode (Query & Support) từ Dataset thực hoặc Giả lập
-        class_id = None
+        # 1. Nạp dữ liệu 1-shot episode (Query & Support) từ Dataset thực hoặc Giả lập
+        class_id = (ep - 1) % num_classes
         if real_dataset is not None and len(real_dataset) >= ep:
             data = real_dataset[ep - 1]
             query_img = data["query_img"].unsqueeze(0).to(device)
             query_gt = data["query_mask"].unsqueeze(0).to(device)
             support_img = data["support_img"].unsqueeze(0).to(device)
             support_mask = data["support_mask"].unsqueeze(0).to(device)
-            class_id = data.get("class_id", None)
+            class_id = data.get("class_id", class_id)
         else:
             img_size = cfg["dataset"]["img_size"]
             query_img = torch.randn(1, 3, img_size, img_size).to(device)
@@ -133,62 +125,53 @@ def run_benchmark(
             support_img = torch.randn(1, 3, img_size, img_size).to(device)
             support_mask = (torch.rand(1, 1, img_size, img_size) > 0.6).float().to(device)
 
-        # 3. Test-Time Adaptation Loop (nếu không bỏ qua)
-        final_loss_val = 0.0
-        if not skip_tta:
-            adapters.train()
-            img_size = cfg["dataset"]["img_size"]
-            for epoch in range(cfg["tta"]["epochs"]):
-                optimizer.zero_grad()
+        # 2. Trích xuất đặc trưng Backbone
+        with torch.no_grad():
+            q_feats = backbone(query_img)
+            s_feats = backbone(support_img)
 
+        # 3. Thích nghi theo lớp (Class-Wise Adaptation)
+        final_loss_val = 0.0
+        if adapt_to != "none":
+            need_fit = False
+            if adapt_to == "first-episode":
+                need_fit = not class_adapters.has_fitted(class_id)
+            elif adapt_to == "every-episode":
+                need_fit = True
+
+            if need_fit:
                 query_aug = augmentation(query_img)
                 support_aug, support_mask_aug = augmentation(support_img, support_mask)
 
-                q_feats = backbone(query_img)
-                q_aug_feats = backbone(query_aug)
-                s_feats = backbone(support_img)
-                s_aug_feats = backbone(support_aug)
+                with torch.no_grad():
+                    q_aug_feats = backbone(query_aug)
+                    s_aug_feats = backbone(support_aug)
 
-                q_adapted = adapters(q_feats)
-                q_aug_adapted = adapters(q_aug_feats)
-                s_adapted = adapters(s_feats)
-                s_aug_adapted = adapters(s_aug_feats)
+                final_loss_val = class_adapters.fit_class(
+                    class_id=class_id,
+                    q_feats=q_feats,
+                    q_aug_feats=q_aug_feats,
+                    s_feats=s_feats,
+                    s_aug_feats=s_aug_feats,
+                    s_mask=support_mask,
+                    s_aug_mask=support_mask_aug,
+                    device=device
+                )
 
-                total_loss = 0.0
-                w_cfg = cfg["tta"]["loss_weights"]
-
-                for l in range(len(q_adapted)):
-                    loss_nce_q = l_nce(q_adapted[l], q_aug_adapted[l])
-                    loss_nce_s = l_nce(s_adapted[l], s_aug_adapted[l])
-                    loss_stat_l = l_stat(q_adapted[l], q_aug_adapted[l]) + l_stat(s_adapted[l], s_aug_adapted[l])
-                    loss_p_l = l_p(s_adapted[l], s_aug_adapted[l], support_mask, support_mask_aug)
-
-                    total_loss += (w_cfg["w_nce_q"] * loss_nce_q +
-                                  w_cfg["w_nce_s"] * loss_nce_s +
-                                  w_cfg["w_stat"] * loss_stat_l +
-                                  w_cfg["w_p"] * loss_p_l)
-
-                # Self-Reconstruction Loss trên Support:
-                # Ép Adapter căn chỉnh đặc trưng Support sao cho tái tạo hoàn hảo Support Mask thật
-                pred_s_self = fusion_module(s_adapted, s_adapted, support_mask, target_size=(img_size, img_size))
-                loss_self_attn = F.binary_cross_entropy(pred_s_self.clamp(1e-6, 1.0 - 1e-6), support_mask.float())
-                total_loss += w_cfg.get("w_self_attn", 2.0) * loss_self_attn
-
-                total_loss.backward()
-                optimizer.step()
-            final_loss_val = total_loss.item()
+            # Chiếu đặc trưng qua Adapter của class_id
+            q_final = class_adapters.transform(class_id, q_feats, device)
+            s_final = class_adapters.transform(class_id, s_feats, device)
+        else:
+            # Thuần Zero-Shot (không qua Projector)
+            q_final = q_feats
+            s_final = s_feats
 
         # 4. Inference & Evaluate
-        adapters.eval()
         with torch.no_grad():
-            q_feats_final = adapters(backbone(query_img))
-            s_feats_final = adapters(backbone(support_img))
-
             img_size = cfg["dataset"]["img_size"]
-            pred_prob_map = fusion_module(q_feats_final, s_feats_final, support_mask, target_size=(img_size, img_size))
+            pred_prob_map = fusion_module(q_final, s_final, support_mask, target_size=(img_size, img_size))
             
-            # 🔥 ĐỘT PHÁ: Dynamic Otsu Thresholding (chuẩn ABCDFSS pred_mean)
-            # Tự động tìm ngưỡng phân tách tối ưu cho từng ảnh Query, ngăn chặn hoàn toàn tràn False Positive!
+            # 🔥 Dynamic Otsu Thresholding (chuẩn ABCDFSS pred_mean)
             pred_bin_mask = compute_dynamic_threshold_mask(pred_prob_map)
 
             if use_crf:
@@ -214,7 +197,7 @@ def run_benchmark(
                 save_path="experiments/sample_episode_viz.png"
             )
 
-        print(f"Episode [{ep:02d}/{num_episodes:02d}] - FG-IoU: {ep_res['IoU_FG']*100:.2f}% | FB-IoU: {ep_res['FB-IoU']*100:.2f}% | Loss: {final_loss_val:.4f}")
+        print(f"Episode [{ep:02d}/{num_episodes:02d}] (Class {class_id}) - FG-IoU: {ep_res['IoU_FG']*100:.2f}% | FB-IoU: {ep_res['FB-IoU']*100:.2f}% | Loss: {final_loss_val:.4f}")
 
     overall_res = overall_evaluator.compute()
     mean_ep_miou = np.mean(episode_mious) * 100
@@ -239,7 +222,7 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, default="config/default_config.yaml", help="Đường dẫn file config")
     parser.add_argument("--use_meta_decoder", action="store_true", help="Bật cờ này để dùng MetaDecoder, nếu không sẽ dùng Zero-Shot")
     parser.add_argument("--use_crf", action="store_true", help="Bật cờ này để dùng hậu xử lý CRF (mặc định tắt theo chuẩn ABCDFSS)")
-    parser.add_argument("--skip_tta", action="store_true", help="Bỏ qua TTA, chạy trực tiếp Zero-Shot")
+    parser.add_argument("--adapt_to", type=str, default="first-episode", choices=["first-episode", "every-episode", "none"], help="Cơ chế thích nghi (chuẩn ABCDFSS là first-episode)")
     args = parser.parse_args()
 
     run_benchmark(
@@ -249,5 +232,5 @@ if __name__ == "__main__":
         config_path=args.config,
         use_meta_decoder=args.use_meta_decoder,
         use_crf=args.use_crf,
-        skip_tta=args.skip_tta
+        adapt_to=args.adapt_to
     )

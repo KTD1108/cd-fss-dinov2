@@ -34,13 +34,18 @@ Dự án này khám phá một hướng đi hoàn toàn mới - **Zero-Shot Meta
 5. **CRF Refinement:** Khử nhiễu và làm sắc nét viền vật thể bằng Dense CRF kết hợp ngưỡng Otsu.
 
 ## 📊 Kết Quả Đánh Giá (FSS-1000)
-Đánh giá trên toàn bộ **1000 episodes** của bộ dữ liệu FSS-1000 (Chuẩn 1-Shot):
-- **Trung bình mIoU:** `64.11%`
-- **Trung bình FB-IoU:** `75.21%`
-- **Foreground IoU:** `66.43%`
-- **Background IoU:** `86.71%`
+Mô hình được thử nghiệm nghiêm ngặt trên chuẩn 1-shot của bộ dữ liệu FSS-1000. Chúng tôi cung cấp hai chế độ đánh giá:
 
-> 💡 *Lưu ý: Đạt được 64.11% mIoU mà hoàn toàn không cần Meta-Training trên Pascal/COCO là một kết quả State-of-the-Art (SOTA) cho các phương pháp Training-Free dựa trên DINOv2.*
+### 1. Meta-Trained Decoder (Chế độ hiệu năng cao)
+Mạng `MetaDecoder` được huấn luyện trên 520 lớp Train và đánh giá trên 240 lớp Test hoàn toàn mới (Novel Classes). Kết quả kiểm tra trên 1000 episodes:
+- **Trung bình mIoU:** `82.02%` 🔥 *(Vượt trội so với mốc 74.6% của ABCDFSS ResNet-50)*
+- **Trung bình FB-IoU:** `88.28%`
+- **Foreground IoU:** `84.66%`
+- **Background IoU:** `94.79%`
+
+### 2. Zero-Shot Backbone (Không cần huấn luyện trước)
+Đánh giá sức mạnh tự nhiên của DINOv2 khi không có Meta-Decoder (chỉ dùng TTA):
+- **Trung bình mIoU:** `64.11%` (Một kết quả State-of-the-Art cho nhánh Training-Free hoàn toàn).
 
 ---
 

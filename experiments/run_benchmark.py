@@ -29,7 +29,8 @@ def run_benchmark(
     use_crf: bool = False,
     use_guided_filter: bool = True,
     adapt_to: str = "none",  # 'first-episode', 'every-episode', 'none'
-    img_size: int = None
+    img_size: int = None,
+    zoom_size: int = 1022 # Vũ khí bí mật: Phóng to ảnh để lách luật Patch Size của ViT
 ):
     print("=" * 65)
     mode_name = "META-TRAINED DECODER" if use_meta_decoder else "MULTI-LAYER ZERO-SHOT"
@@ -129,10 +130,15 @@ def run_benchmark(
             support_img = torch.randn(1, 3, img_size, img_size).to(device)
             support_mask = (torch.rand(1, 1, img_size, img_size) > 0.6).float().to(device)
 
-        # 2. Trích xuất đặc trưng Backbone
+        # 2. Trích xuất đặc trưng Backbone (Dùng Kính lúp - Zoom-in)
+        # Phóng to ảnh lên zoom_size (vd: 1022) để DINOv2 đẻ ra Feature Map khổng lồ (73x73 thay vì 28x28)
+        query_zoom = F.interpolate(query_img, size=(zoom_size, zoom_size), mode='bilinear', align_corners=False)
+        support_zoom = F.interpolate(support_img, size=(zoom_size, zoom_size), mode='bilinear', align_corners=False)
+        support_mask_zoom = F.interpolate(support_mask, size=(zoom_size, zoom_size), mode='nearest')
+        
         with torch.no_grad():
-            q_feats = backbone(query_img)
-            s_feats = backbone(support_img)
+            q_feats = backbone(query_zoom)
+            s_feats = backbone(support_zoom)
 
         # 3. Thích nghi theo lớp (Class-Wise Adaptation) nếu bật
         final_loss_val = 0.0
@@ -157,7 +163,7 @@ def run_benchmark(
                     q_aug_feats=q_aug_feats,
                     s_feats=s_feats,
                     s_aug_feats=s_aug_feats,
-                    s_mask=support_mask,
+                    s_mask=support_mask_zoom,
                     s_aug_mask=support_mask_aug,
                     device=device
                 )
@@ -172,10 +178,12 @@ def run_benchmark(
 
         # 4. Inference & Evaluate
         with torch.no_grad():
-            pred_prob_map = fusion_module(q_final, s_final, support_mask, target_size=(img_size, img_size))
+            pred_prob_zoom = fusion_module(q_final, s_final, support_mask_zoom, target_size=(zoom_size, zoom_size))
+            # Thu nhỏ lại về kích thước gốc
+            pred_prob_map = F.interpolate(pred_prob_zoom, size=(img_size, img_size), mode='bilinear', align_corners=False)
             
-            # Predict on support itself to find optimal threshold
-            support_pred_prob = fusion_module(s_final, s_final, support_mask, target_size=(img_size, img_size))
+            # Predict on support itself to find optimal threshold (trên zoom)
+            s_pred_prob_zoom = fusion_module(s_final, s_final, support_mask_zoom, target_size=(zoom_size, zoom_size))
             # Làm sắc nét viền vật thể bằng Fast Guided Filter
             if use_guided_filter:
                 rgb_raw = (query_img * std_t + mean_t).clamp(0.0, 1.0)
@@ -237,7 +245,8 @@ if __name__ == "__main__":
     parser.add_argument("--use_crf", action="store_true", help="Bật cờ này để dùng hậu xử lý CRF")
     parser.add_argument("--no_guided_filter", action="store_true", help="Tắt Guided Filter")
     parser.add_argument("--adapt_to", type=str, default="none", choices=["first-episode", "every-episode", "none"], help="Cơ chế thích nghi")
-    parser.add_argument("--img_size", type=int, default=None, help="Kích thước ảnh (vd: 392 hoặc 518)")
+    parser.add_argument("--img_size", type=int, default=None, help="Kích thước ảnh gốc (vd: 392 hoặc 518)")
+    parser.add_argument("--zoom_size", type=int, default=1022, help="Kích thước phóng to cho DINOv2")
     args = parser.parse_args()
 
     run_benchmark(
@@ -249,5 +258,6 @@ if __name__ == "__main__":
         use_crf=args.use_crf,
         use_guided_filter=not args.no_guided_filter,
         adapt_to=args.adapt_to,
-        img_size=args.img_size
+        img_size=args.img_size,
+        zoom_size=args.zoom_size
     )

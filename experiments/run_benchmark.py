@@ -152,10 +152,15 @@ def run_benchmark(
             if need_fit:
                 query_aug = augmentation(query_img)
                 support_aug, support_mask_aug = augmentation(support_img, support_mask)
+                
+                # Áp dụng Kính lúp (Zoom-in) cho cả ảnh đã Data Augmentation
+                query_aug_zoom = F.interpolate(query_aug, size=(zoom_size, zoom_size), mode='bilinear', align_corners=False)
+                support_aug_zoom = F.interpolate(support_aug, size=(zoom_size, zoom_size), mode='bilinear', align_corners=False)
+                support_mask_aug_zoom = F.interpolate(support_mask_aug, size=(zoom_size, zoom_size), mode='nearest')
 
                 with torch.no_grad():
-                    q_aug_feats = backbone(query_aug)
-                    s_aug_feats = backbone(support_aug)
+                    q_aug_feats = backbone(query_aug_zoom)
+                    s_aug_feats = backbone(support_aug_zoom)
 
                 final_loss_val = class_adapters.fit_class(
                     class_id=class_id,
@@ -164,7 +169,7 @@ def run_benchmark(
                     s_feats=s_feats,
                     s_aug_feats=s_aug_feats,
                     s_mask=support_mask_zoom,
-                    s_aug_mask=support_mask_aug,
+                    s_aug_mask=support_mask_aug_zoom,
                     device=device
                 )
 

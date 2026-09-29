@@ -11,6 +11,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 from models.dinov2_backbone import DINOv2Backbone
 from models.convnext_backbone import ConvNeXtBackbone
+from models.resnet_backbone import ResNetBackbone
 from models.meta_decoder import FSSMetaDecoder
 from models.crf_refinement import DenseCRFRefinement
 from core.contrastive_head import ClassContrastiveAdapters
@@ -81,10 +82,12 @@ def run_benchmark(
         except Exception as e:
             print(f"⚠️ Không thể khởi tạo Dataset ({e}), chuyển sang chế độ giả lập.")
 
-    # Load Backbone (eval mode, frozen)
     if backbone_type == "convnext":
         print("🚀 Khởi tạo siêu mạng ConvNeXt-V2 (CNN)!")
         backbone = ConvNeXtBackbone(embed_dim=384).to(device)
+    elif backbone_type == "resnet50":
+        print("🚀 Khởi tạo siêu mạng ResNet50 (Chuẩn bài báo ABCDFSS)!")
+        backbone = ResNetBackbone(backbone_name="resnet50").to(device)
     else:
         print("🚀 Khởi tạo DINOv2!")
         backbone = DINOv2Backbone(
@@ -216,7 +219,7 @@ def run_benchmark(
 
         # 4. Inference & Evaluate
         with torch.no_grad():
-            target_s = (img_size, img_size) if backbone_type == "convnext" else (zoom_size, zoom_size)
+            target_s = (img_size, img_size) if backbone_type in ["convnext", "resnet50"] else (zoom_size, zoom_size)
             
             if use_meta_decoder:
                 # Dùng Meta-Decoder đã được huấn luyện để giải mã trực tiếp ra xác suất
@@ -226,7 +229,7 @@ def run_benchmark(
                 pred_prob_zoom = fusion_module(q_final, s_final, support_mask_zoom, target_size=target_s)
             
             # Thu nhỏ lại về kích thước gốc nếu dùng DINOv2
-            if backbone_type == "convnext":
+            if backbone_type in ["convnext", "resnet50"]:
                 pred_prob_map = pred_prob_zoom
             else:
                 pred_prob_map = F.interpolate(pred_prob_zoom, size=(img_size, img_size), mode='bilinear', align_corners=False)
@@ -301,7 +304,7 @@ if __name__ == "__main__":
     parser.add_argument("--adapt_to", type=str, default="none", choices=["first-episode", "every-episode", "none"], help="Cơ chế thích nghi")
     parser.add_argument("--img_size", type=int, default=None, help="Kích thước ảnh gốc (vd: 392 hoặc 518)")
     parser.add_argument("--zoom_size", type=int, default=1022, help="Kích thước phóng to (dành riêng cho DINOv2)")
-    parser.add_argument("--backbone_type", type=str, default="dinov2", choices=["dinov2", "convnext"], help="Chọn lõi mô hình")
+    parser.add_argument("--backbone_type", type=str, default="dinov2", choices=["dinov2", "convnext", "resnet50"], help="Chọn lõi mô hình")
     args = parser.parse_args()
 
     run_benchmark(

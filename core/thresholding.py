@@ -1,6 +1,5 @@
 import torch
 import numpy as np
-import cv2
 
 def compute_adaptive_threshold_mask(
     prob_map: torch.Tensor,

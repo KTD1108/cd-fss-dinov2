@@ -156,8 +156,8 @@ def run_benchmark(
             support_mask = (torch.rand(1, 1, img_size, img_size) > 0.6).float().to(device)
 
         # 2. Trích xuất đặc trưng Backbone
-        if backbone_type == "convnext":
-            # ConvNeXt đã có độ phân giải siêu cao (Stride 4), không cần Kính lúp!
+        if backbone_type in ["convnext", "resnet50"]:
+            # ConvNeXt/ResNet đã có độ phân giải siêu cao (Stride 4), không cần Kính lúp!
             query_zoom = query_img
             support_zoom = support_img
             support_mask_zoom = support_mask
@@ -185,7 +185,7 @@ def run_benchmark(
                 support_aug, support_mask_aug = augmentation(support_img, support_mask)
                 
                 # Áp dụng Kính lúp (Zoom-in) cho cả ảnh đã Data Augmentation
-                if backbone_type == "convnext":
+                if backbone_type in ["convnext", "resnet50"]:
                     query_aug_zoom = query_aug
                     support_aug_zoom = support_aug
                     support_mask_aug_zoom = support_mask_aug

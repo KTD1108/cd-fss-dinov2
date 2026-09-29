@@ -50,12 +50,9 @@ class ResNetBackbone(nn.Module):
         f3 = self.layer3(f2) # [B, 1024, H/16, W/16]
         f4 = self.layer4(f3) # [B, 2048, H/32, W/32]
 
-        # Phóng to tất cả về H/4 (giống hệt tư tưởng của ConvNeXt)
-        h, w = f1.shape[-2:]
-        f2 = torch.nn.functional.interpolate(f2, size=(h, w), mode='bilinear', align_corners=False)
-        f3 = torch.nn.functional.interpolate(f3, size=(h, w), mode='bilinear', align_corners=False)
-        f4 = torch.nn.functional.interpolate(f4, size=(h, w), mode='bilinear', align_corners=False)
-
+        # Không upsample để tránh sập RAM (OOM) do ma trận Attention quá lớn.
+        # Các layer sẽ giữ nguyên độ phân giải: H/4, H/8, H/16, H/32
+        
         # Ép channel về 384
         out1 = self.proj1(f1)
         out2 = self.proj2(f2)

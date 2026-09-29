@@ -40,10 +40,7 @@ class ConvNeXtBackbone(nn.Module):
             # 1. Chiếu về số kênh chuẩn (384)
             proj_feat = self.projectors[i](feat)
             
-            # 2. Phóng to (Upsample) các layer sâu về độ phân giải của Layer 0
-            if i > 0:
-                proj_feat = F.interpolate(proj_feat, size=target_size, mode='bilinear', align_corners=False)
-                
+            # Không upsample, giữ nguyên H/4, H/8, H/16, H/32
             uniform_feats.append(proj_feat)
             
         return uniform_feats

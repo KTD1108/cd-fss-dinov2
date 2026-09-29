@@ -128,4 +128,11 @@ def train_meta_decoder(config_path: str = "config/default_config.yaml", dataset_
     print("\n✅ Huấn luyện hoàn tất. Sẵn sàng mang sang DeepGlobe để Test!")
 
 if __name__ == "__main__":
-    train_meta_decoder()
+    import argparse
+    parser = argparse.ArgumentParser(description="Train Meta-Decoder")
+    parser.add_argument("--dataset_root", type=str, default="/dataset/FSS-1000", help="Đường dẫn tới FSS-1000")
+    parser.add_argument("--epochs", type=int, default=10, help="Số epoch")
+    parser.add_argument("--batch_size", type=int, default=8, help="Kích thước batch")
+    args = parser.parse_args()
+    
+    train_meta_decoder(dataset_root=args.dataset_root, epochs=args.epochs, batch_size=args.batch_size)

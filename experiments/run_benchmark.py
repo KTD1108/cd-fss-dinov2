@@ -99,10 +99,18 @@ def run_benchmark(
     augmentation = RandomShearAugmentation()
     guided_filter = FastGuidedFilter(r=4, eps=1e-2, blend_alpha=0.5).to(device)
     
+    # Xác định số layer trích xuất
+    if backbone_type == "resnet50":
+        num_extracted_layers = 2 # Chỉ lấy layer2 và layer3
+    elif backbone_type == "convnext":
+        num_extracted_layers = 4
+    else:
+        num_extracted_layers = len(cfg["model"]["intermediate_layers"])
+
     # Quản lý Adapter theo từng Class ID (chuẩn bài báo ABCDFSS)
     class_adapters = ClassContrastiveAdapters(
         num_classes=num_classes,
-        num_layers=len(cfg["model"]["intermediate_layers"]),
+        num_layers=num_extracted_layers,
         in_dim=backbone.embed_dim,
         out_dim=64,
         lr=cfg["tta"]["lr"],
@@ -110,7 +118,7 @@ def run_benchmark(
     )
 
     fusion_module = MultiLayerFusion(
-        layer_weights=[0.25, 0.25, 0.25, 0.25], 
+        layer_weights=[0.5, 0.5] if backbone_type == "resnet50" else [0.25, 0.25, 0.25, 0.25], 
         temperature=0.15,
         proto_ratio=0.5
     ).to(device)
@@ -226,7 +234,8 @@ def run_benchmark(
                 pred_prob_zoom = meta_decoder(q_feats, s_feats, support_mask_zoom, target_size=target_s)
                 # Decoder trả về Probability Map, không cần Fusion Module
             else:
-                pred_prob_zoom = fusion_module(q_final, s_final, support_mask_zoom, target_size=target_s)
+                sglw_flag = (backbone_type != "resnet50")
+                pred_prob_zoom = fusion_module(q_final, s_final, support_mask_zoom, target_size=target_s, use_sglw=sglw_flag)
             
             # Thu nhỏ lại về kích thước gốc nếu dùng DINOv2
             if backbone_type in ["convnext", "resnet50"]:
@@ -240,7 +249,7 @@ def run_benchmark(
                 pred_bin_mask = (refined_prob > 0.5).float()
             else:
                 # Predict on support itself to find optimal threshold (trên zoom)
-                s_pred_prob_zoom = fusion_module(s_final, s_final, support_mask_zoom, target_size=target_s)
+                s_pred_prob_zoom = fusion_module(s_final, s_final, support_mask_zoom, target_size=target_s, use_sglw=sglw_flag)
                 # Làm sắc nét viền vật thể bằng Fast Guided Filter
                 if use_guided_filter:
                     rgb_raw = (query_img * std_t + mean_t).clamp(0.0, 1.0)

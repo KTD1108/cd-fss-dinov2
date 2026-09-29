@@ -13,7 +13,7 @@ from models.dinov2_backbone import DINOv2Backbone
 from models.crf_refinement import DenseCRFRefinement
 from core.contrastive_head import ClassContrastiveAdapters
 from core.attention import MultiLayerFusion
-from core.thresholding import compute_adaptive_threshold_mask
+from core.thresholding import compute_adaptive_threshold_mask, compute_support_guided_threshold
 from core.guided_filter import FastGuidedFilter
 from core.evaluator import Evaluator
 from data.transforms import RandomShearAugmentation
@@ -174,6 +174,8 @@ def run_benchmark(
         with torch.no_grad():
             pred_prob_map = fusion_module(q_final, s_final, support_mask, target_size=(img_size, img_size))
             
+            # Predict on support itself to find optimal threshold
+            support_pred_prob = fusion_module(s_final, s_final, support_mask, target_size=(img_size, img_size))
             # Làm sắc nét viền vật thể bằng Fast Guided Filter
             if use_guided_filter:
                 rgb_raw = (query_img * std_t + mean_t).clamp(0.0, 1.0)
@@ -181,8 +183,9 @@ def run_benchmark(
             else:
                 refined_prob = pred_prob_map
 
-            # 🛡️ Dynamic Adaptive Thresholding (Otsu + Mean Safeguard + Sanity Guard)
-            pred_bin_mask = compute_adaptive_threshold_mask(refined_prob)
+            # 🛡️ Dynamic Adaptive Thresholding với Support-Ratio Guard
+            s_fg_ratio = support_mask.mean().item()
+            pred_bin_mask = compute_adaptive_threshold_mask(refined_prob, support_fg_ratio=s_fg_ratio)
 
             if use_crf:
                 img_np = (query_img[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)

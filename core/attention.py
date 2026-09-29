@@ -103,7 +103,8 @@ class MultiLayerFusion(nn.Module):
         query_feats: List[torch.Tensor],
         support_feats: List[torch.Tensor],
         support_mask: torch.Tensor,
-        target_size: tuple = (392, 392)
+        target_size: tuple = (392, 392),
+        use_sglw: bool = True
     ) -> torch.Tensor:
         
         pred_maps = []
@@ -114,7 +115,31 @@ class MultiLayerFusion(nn.Module):
             pred_maps.append(pred_l_upsampled)
 
         stacked_preds = torch.stack(pred_maps, dim=1) # [B, L, 1, H, W]
-        w = self.weights.view(1, -1, 1, 1, 1).to(stacked_preds.device)
+        
+        if use_sglw:
+            # 🚀 Support-Guided Layer Weighting (SGLW): Tự động đánh giá layer nào tốt nhất
+            B, L, _, _, _ = stacked_preds.shape
+            s_mask_flat = support_mask.view(B, -1)
+            dynamic_weights = []
+            
+            for l in range(L):
+                # Tự soi (Self-Attention) trên chính ảnh Support
+                s_pred_l = self.cross_attn(support_feats[l], support_feats[l], support_mask)
+                s_pred_l_up = F.interpolate(s_pred_l, size=target_size, mode="bilinear", align_corners=False)
+                
+                # Tính Soft-IoU giữa dự đoán của Support và Ground Truth
+                pred_flat = s_pred_l_up.view(B, -1)
+                intersection = (pred_flat * s_mask_flat).sum(dim=1)
+                union = pred_flat.sum(dim=1) + s_mask_flat.sum(dim=1) - intersection
+                iou = intersection / (union + 1e-8)
+                dynamic_weights.append(iou)
+                
+            dynamic_weights = torch.stack(dynamic_weights, dim=1) # [B, L]
+            # Dùng Softmax (T=0.1) để dồn toàn bộ trọng số vào Layer có IoU cao nhất
+            w = F.softmax(dynamic_weights / 0.1, dim=1).view(B, L, 1, 1, 1)
+        else:
+            w = self.weights.view(1, -1, 1, 1, 1).to(stacked_preds.device)
+            
         fused_pred = (stacked_preds * w).sum(dim=1)
         return fused_pred
 

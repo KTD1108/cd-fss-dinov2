@@ -11,6 +11,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 from models.dinov2_backbone import DINOv2Backbone
 from models.convnext_backbone import ConvNeXtBackbone
+from models.meta_decoder import FSSMetaDecoder
 from models.crf_refinement import DenseCRFRefinement
 from core.contrastive_head import ClassContrastiveAdapters
 from core.attention import MultiLayerFusion
@@ -114,6 +115,19 @@ def run_benchmark(
         
     crf_refiner = DenseCRFRefinement()
 
+    # Khởi tạo Meta-Decoder nếu bật cờ
+    meta_decoder = None
+    if use_meta_decoder:
+        print("🔧 Tải trọng lượng Meta-Decoder (weights/best_meta_decoder.pth)...")
+        meta_decoder = FSSMetaDecoder(in_channels=backbone.embed_dim, num_layers=len(cfg["model"]["intermediate_layers"])).to(device)
+        try:
+            meta_decoder.load_state_dict(torch.load("weights/best_meta_decoder.pth", map_location=device))
+            meta_decoder.eval()
+            print("✅ Tải Meta-Decoder thành công!")
+        except Exception as e:
+            print(f"⚠️ LỖI: Không tìm thấy file weights/best_meta_decoder.pth. Vui lòng chạy train_decoder.py trước. Chi tiết: {e}")
+            sys.exit(1)
+
     overall_evaluator = Evaluator(num_classes=num_classes)
     episode_mious = []
     episode_fb_ious = []
@@ -204,7 +218,12 @@ def run_benchmark(
         with torch.no_grad():
             target_s = (img_size, img_size) if backbone_type == "convnext" else (zoom_size, zoom_size)
             
-            pred_prob_zoom = fusion_module(q_final, s_final, support_mask_zoom, target_size=target_s)
+            if use_meta_decoder:
+                # Dùng Meta-Decoder đã được huấn luyện để giải mã trực tiếp ra xác suất
+                pred_prob_zoom = meta_decoder(q_feats, s_feats, support_mask_zoom, target_size=target_s)
+                # Decoder trả về Probability Map, không cần Fusion Module
+            else:
+                pred_prob_zoom = fusion_module(q_final, s_final, support_mask_zoom, target_size=target_s)
             
             # Thu nhỏ lại về kích thước gốc nếu dùng DINOv2
             if backbone_type == "convnext":
@@ -212,18 +231,23 @@ def run_benchmark(
             else:
                 pred_prob_map = F.interpolate(pred_prob_zoom, size=(img_size, img_size), mode='bilinear', align_corners=False)
             
-            # Predict on support itself to find optimal threshold (trên zoom)
-            s_pred_prob_zoom = fusion_module(s_final, s_final, support_mask_zoom, target_size=target_s)
-            # Làm sắc nét viền vật thể bằng Fast Guided Filter
-            if use_guided_filter:
-                rgb_raw = (query_img * std_t + mean_t).clamp(0.0, 1.0)
-                refined_prob = guided_filter(rgb_raw, pred_prob_map)
-            else:
+            if use_meta_decoder:
+                # Meta-Decoder xuất ra Sigmoid [0, 1], ta chỉ việc lấy ngưỡng 0.5
                 refined_prob = pred_prob_map
-
-            # 🛡️ Dynamic Adaptive Thresholding với Support-Ratio Guard
-            s_fg_ratio = support_mask.mean().item()
-            pred_bin_mask = compute_adaptive_threshold_mask(refined_prob, support_fg_ratio=s_fg_ratio)
+                pred_bin_mask = (refined_prob > 0.5).float()
+            else:
+                # Predict on support itself to find optimal threshold (trên zoom)
+                s_pred_prob_zoom = fusion_module(s_final, s_final, support_mask_zoom, target_size=target_s)
+                # Làm sắc nét viền vật thể bằng Fast Guided Filter
+                if use_guided_filter:
+                    rgb_raw = (query_img * std_t + mean_t).clamp(0.0, 1.0)
+                    refined_prob = guided_filter(rgb_raw, pred_prob_map)
+                else:
+                    refined_prob = pred_prob_map
+    
+                # 🛡️ Dynamic Adaptive Thresholding với Support-Ratio Guard
+                s_fg_ratio = support_mask.mean().item()
+                pred_bin_mask = compute_adaptive_threshold_mask(refined_prob, support_fg_ratio=s_fg_ratio)
 
             if use_crf:
                 img_np = (query_img[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)

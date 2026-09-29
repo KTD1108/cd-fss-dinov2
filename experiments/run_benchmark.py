@@ -10,6 +10,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 from models.dinov2_backbone import DINOv2Backbone
+from models.convnext_backbone import ConvNeXtBackbone
 from models.crf_refinement import DenseCRFRefinement
 from core.contrastive_head import ClassContrastiveAdapters
 from core.attention import MultiLayerFusion
@@ -30,7 +31,8 @@ def run_benchmark(
     use_guided_filter: bool = True,
     adapt_to: str = "none",  # 'first-episode', 'every-episode', 'none'
     img_size: int = None,
-    zoom_size: int = 1022 # Vũ khí bí mật: Phóng to ảnh để lách luật Patch Size của ViT
+    zoom_size: int = 1022, # Phóng to ảnh để lách luật Patch Size của ViT
+    backbone_type: str = "dinov2" # 'dinov2' hoặc 'convnext'
 ):
     print("=" * 65)
     mode_name = "META-TRAINED DECODER" if use_meta_decoder else "MULTI-LAYER ZERO-SHOT"
@@ -79,10 +81,16 @@ def run_benchmark(
             print(f"⚠️ Không thể khởi tạo Dataset ({e}), chuyển sang chế độ giả lập.")
 
     # Load Backbone (eval mode, frozen)
-    backbone = DINOv2Backbone(
-        backbone_name=cfg["model"]["backbone_name"],
-        intermediate_layers=cfg["model"]["intermediate_layers"]
-    ).to(device)
+    if backbone_type == "convnext":
+        print("🚀 Khởi tạo siêu mạng ConvNeXt-V2 (CNN)!")
+        backbone = ConvNeXtBackbone(embed_dim=384).to(device)
+    else:
+        print("🚀 Khởi tạo DINOv2!")
+        backbone = DINOv2Backbone(
+            backbone_name=cfg["model"]["backbone_name"],
+            intermediate_layers=cfg["model"]["intermediate_layers"]
+        ).to(device)
+    backbone.eval()
 
     augmentation = RandomShearAugmentation()
     guided_filter = FastGuidedFilter(r=4, eps=1e-2, blend_alpha=0.5).to(device)
@@ -130,11 +138,17 @@ def run_benchmark(
             support_img = torch.randn(1, 3, img_size, img_size).to(device)
             support_mask = (torch.rand(1, 1, img_size, img_size) > 0.6).float().to(device)
 
-        # 2. Trích xuất đặc trưng Backbone (Dùng Kính lúp - Zoom-in)
-        # Phóng to ảnh lên zoom_size (vd: 1022) để DINOv2 đẻ ra Feature Map khổng lồ (73x73 thay vì 28x28)
-        query_zoom = F.interpolate(query_img, size=(zoom_size, zoom_size), mode='bilinear', align_corners=False)
-        support_zoom = F.interpolate(support_img, size=(zoom_size, zoom_size), mode='bilinear', align_corners=False)
-        support_mask_zoom = F.interpolate(support_mask, size=(zoom_size, zoom_size), mode='nearest')
+        # 2. Trích xuất đặc trưng Backbone
+        if backbone_type == "convnext":
+            # ConvNeXt đã có độ phân giải siêu cao (Stride 4), không cần Kính lúp!
+            query_zoom = query_img
+            support_zoom = support_img
+            support_mask_zoom = support_mask
+        else:
+            # Phóng to ảnh lên zoom_size để DINOv2 lách luật Patch Size
+            query_zoom = F.interpolate(query_img, size=(zoom_size, zoom_size), mode='bilinear', align_corners=False)
+            support_zoom = F.interpolate(support_img, size=(zoom_size, zoom_size), mode='bilinear', align_corners=False)
+            support_mask_zoom = F.interpolate(support_mask, size=(zoom_size, zoom_size), mode='nearest')
         
         with torch.no_grad():
             q_feats = backbone(query_zoom)
@@ -154,9 +168,14 @@ def run_benchmark(
                 support_aug, support_mask_aug = augmentation(support_img, support_mask)
                 
                 # Áp dụng Kính lúp (Zoom-in) cho cả ảnh đã Data Augmentation
-                query_aug_zoom = F.interpolate(query_aug, size=(zoom_size, zoom_size), mode='bilinear', align_corners=False)
-                support_aug_zoom = F.interpolate(support_aug, size=(zoom_size, zoom_size), mode='bilinear', align_corners=False)
-                support_mask_aug_zoom = F.interpolate(support_mask_aug, size=(zoom_size, zoom_size), mode='nearest')
+                if backbone_type == "convnext":
+                    query_aug_zoom = query_aug
+                    support_aug_zoom = support_aug
+                    support_mask_aug_zoom = support_mask_aug
+                else:
+                    query_aug_zoom = F.interpolate(query_aug, size=(zoom_size, zoom_size), mode='bilinear', align_corners=False)
+                    support_aug_zoom = F.interpolate(support_aug, size=(zoom_size, zoom_size), mode='bilinear', align_corners=False)
+                    support_mask_aug_zoom = F.interpolate(support_mask_aug, size=(zoom_size, zoom_size), mode='nearest')
 
                 with torch.no_grad():
                     q_aug_feats = backbone(query_aug_zoom)
@@ -183,12 +202,18 @@ def run_benchmark(
 
         # 4. Inference & Evaluate
         with torch.no_grad():
-            pred_prob_zoom = fusion_module(q_final, s_final, support_mask_zoom, target_size=(zoom_size, zoom_size))
-            # Thu nhỏ lại về kích thước gốc
-            pred_prob_map = F.interpolate(pred_prob_zoom, size=(img_size, img_size), mode='bilinear', align_corners=False)
+            target_s = (img_size, img_size) if backbone_type == "convnext" else (zoom_size, zoom_size)
+            
+            pred_prob_zoom = fusion_module(q_final, s_final, support_mask_zoom, target_size=target_s)
+            
+            # Thu nhỏ lại về kích thước gốc nếu dùng DINOv2
+            if backbone_type == "convnext":
+                pred_prob_map = pred_prob_zoom
+            else:
+                pred_prob_map = F.interpolate(pred_prob_zoom, size=(img_size, img_size), mode='bilinear', align_corners=False)
             
             # Predict on support itself to find optimal threshold (trên zoom)
-            s_pred_prob_zoom = fusion_module(s_final, s_final, support_mask_zoom, target_size=(zoom_size, zoom_size))
+            s_pred_prob_zoom = fusion_module(s_final, s_final, support_mask_zoom, target_size=target_s)
             # Làm sắc nét viền vật thể bằng Fast Guided Filter
             if use_guided_filter:
                 rgb_raw = (query_img * std_t + mean_t).clamp(0.0, 1.0)
@@ -251,7 +276,8 @@ if __name__ == "__main__":
     parser.add_argument("--no_guided_filter", action="store_true", help="Tắt Guided Filter")
     parser.add_argument("--adapt_to", type=str, default="none", choices=["first-episode", "every-episode", "none"], help="Cơ chế thích nghi")
     parser.add_argument("--img_size", type=int, default=None, help="Kích thước ảnh gốc (vd: 392 hoặc 518)")
-    parser.add_argument("--zoom_size", type=int, default=1022, help="Kích thước phóng to cho DINOv2")
+    parser.add_argument("--zoom_size", type=int, default=1022, help="Kích thước phóng to (dành riêng cho DINOv2)")
+    parser.add_argument("--backbone_type", type=str, default="dinov2", choices=["dinov2", "convnext"], help="Chọn lõi mô hình")
     args = parser.parse_args()
 
     run_benchmark(
@@ -264,5 +290,6 @@ if __name__ == "__main__":
         use_guided_filter=not args.no_guided_filter,
         adapt_to=args.adapt_to,
         img_size=args.img_size,
-        zoom_size=args.zoom_size
+        zoom_size=args.zoom_size,
+        backbone_type=args.backbone_type
     )
